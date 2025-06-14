@@ -1,0 +1,766 @@
+/**
+ * Power Importer Pro - 现代化管理界面样式 (Airbnb风格)
+ */
+
+/* 全局样式重置和基础设置 */
+.wrap .pip-container {
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 20px;
+}
+
+/* 页面标题 */
+.wrap h1 {
+    font-size: 32px;
+    font-weight: 600;
+    color: #222;
+    margin-bottom: 8px;
+}
+
+.pip-subtitle {
+    font-size: 16px;
+    color: #717171;
+    margin-bottom: 32px;
+    font-weight: 400;
+}
+
+/* 现代化卡片设计 */
+.pip-card {
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.24);
+    margin-bottom: 24px;
+    overflow: hidden;
+    transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+.pip-card:hover {
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.15), 0 10px 10px rgba(0, 0, 0, 0.1);
+    transform: translateY(-2px);
+}
+
+.pip-card-header {
+    padding: 24px 24px 0 24px;
+    border-bottom: 1px solid #f0f0f0;
+    margin-bottom: 24px;
+}
+
+.pip-card-title {
+    font-size: 20px;
+    font-weight: 600;
+    color: #222;
+    margin: 0 0 8px 0;
+}
+
+.pip-card-subtitle {
+    font-size: 14px;
+    color: #717171;
+    margin: 0;
+}
+
+.pip-card-content {
+    padding: 0 24px 24px 24px;
+}
+
+/* 批量控制面板 - Airbnb风格 */
+.pip-control-panel {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border-radius: 16px;
+    padding: 32px;
+    margin-bottom: 32px;
+    position: relative;
+    overflow: hidden;
+}
+
+.pip-control-panel::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.05'%3E%3Ccircle cx='30' cy='30' r='2'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") repeat;
+    pointer-events: none;
+}
+
+.pip-control-panel .pip-card-title {
+    color: white;
+    font-size: 24px;
+    margin-bottom: 16px;
+}
+
+.pip-batch-controls {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.pip-control-button {
+    background: rgba(255, 255, 255, 0.15);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    color: white;
+    padding: 12px 20px;
+    border-radius: 8px;
+    font-weight: 500;
+    transition: all 0.3s ease;
+    backdrop-filter: blur(10px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}
+
+.pip-control-button:hover {
+    background: rgba(255, 255, 255, 0.25);
+    border-color: rgba(255, 255, 255, 0.4);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.pip-global-settings {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 20px;
+    background: rgba(255, 255, 255, 0.1);
+    padding: 20px;
+    border-radius: 12px;
+    backdrop-filter: blur(10px);
+}
+
+.pip-setting-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.pip-setting-label {
+    font-size: 14px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.pip-setting-input {
+    background: rgba(255, 255, 255, 0.15);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    color: white;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 14px;
+    transition: all 0.3s ease;
+}
+
+.pip-setting-input:focus {
+    background: rgba(255, 255, 255, 0.25);
+    border-color: rgba(255, 255, 255, 0.5);
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.1);
+}
+
+.pip-setting-input::placeholder {
+    color: rgba(255, 255, 255, 0.6);
+}
+
+/* 拖拽上传区域 - Airbnb风格 */
+.pip-upload-area {
+    background: #fff;
+    border-radius: 16px;
+    overflow: hidden;
+}
+
+.pip-drop-zone {
+    border: 2px dashed #e4e6ea;
+    border-radius: 12px;
+    padding: 64px 32px;
+    text-align: center;
+    background: #fafbfc;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    cursor: pointer;
+    position: relative;
+    margin: 24px;
+}
+
+.pip-drop-zone:hover,
+.pip-drop-zone.drag-over {
+    border-color: #ff5a5f;
+    background: #fff5f5;
+    transform: scale(1.02);
+    box-shadow: 0 8px 25px rgba(255, 90, 95, 0.15);
+}
+
+.pip-drop-zone-content .pip-upload-icon {
+    width: 64px;
+    height: 64px;
+    margin: 0 auto 24px;
+    background: linear-gradient(135deg, #ff5a5f, #ff7e82);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 24px;
+}
+
+.pip-drop-zone-content h3 {
+    font-size: 24px;
+    font-weight: 600;
+    color: #222;
+    margin: 0 0 8px 0;
+}
+
+.pip-drop-zone-content p {
+    font-size: 16px;
+    color: #717171;
+    margin: 0 0 24px 0;
+}
+
+.pip-upload-button {
+    background: #ff5a5f;
+    color: white;
+    border: none;
+    padding: 14px 28px;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 16px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.pip-upload-button:hover {
+    background: #e74c3c;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(255, 90, 95, 0.3);
+}
+
+/* 进度条 - Airbnb风格 */
+.pip-progress-bar {
+    width: 100%;
+    height: 8px;
+    background: #f0f0f0;
+    border-radius: 4px;
+    overflow: hidden;
+    margin: 16px 0;
+}
+
+.pip-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #ff5a5f, #ff7e82);
+    border-radius: 4px;
+    transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+}
+
+.pip-progress-fill::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(
+        90deg,
+        transparent,
+        rgba(255, 255, 255, 0.4),
+        transparent
+    );
+    animation: progress-shimmer 2s infinite;
+}
+
+@keyframes progress-shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+
+/* 统计卡片 */
+.pip-jobs-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+    margin-bottom: 32px;
+}
+
+.pip-stat {
+    background: white;
+    padding: 20px;
+    border-radius: 12px;
+    text-align: center;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+}
+
+.pip-stat::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 4px;
+    background: var(--stat-color);
+}
+
+.pip-stat:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+}
+
+.pip-stat.pending { --stat-color: #f39c12; }
+.pip-stat.running { --stat-color: #3498db; }
+.pip-stat.completed { --stat-color: #27ae60; }
+.pip-stat.failed { --stat-color: #e74c3c; }
+
+.pip-stat-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: var(--stat-color);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 12px;
+    font-size: 18px;
+}
+
+.pip-stat-count {
+    font-size: 28px;
+    font-weight: 700;
+    color: #222;
+    margin: 0 0 4px 0;
+}
+
+.pip-stat-label {
+    font-size: 14px;
+    color: #717171;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* 任务表格 - 现代化设计 */
+.pip-jobs-table {
+    background: white;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.pip-jobs-table th {
+    background: #f8f9fa;
+    color: #495057;
+    font-weight: 600;
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 20px 16px;
+    border: none;
+    text-align: left;
+}
+
+.pip-jobs-table td {
+    padding: 20px 16px;
+    border-bottom: 1px solid #f0f0f0;
+    vertical-align: middle;
+    color: #222;
+}
+
+.pip-jobs-table tr:hover {
+    background: #fafbfc;
+}
+
+.pip-jobs-table tr:last-child td {
+    border-bottom: none;
+}
+
+/* 状态标签 */
+.pip-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.pip-status-pending {
+    background: #fff3cd;
+    color: #856404;
+    border: 1px solid #ffeaa7;
+}
+
+.pip-status-running {
+    background: #cce5ff;
+    color: #0066cc;
+    border: 1px solid #99d6ff;
+}
+
+.pip-status-completed {
+    background: #d4edda;
+    color: #155724;
+    border: 1px solid #b3d9b3;
+}
+
+.pip-status-failed {
+    background: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+}
+
+.pip-status-paused {
+    background: #e2e3e5;
+    color: #383d41;
+    border: 1px solid #d1d3d4;
+}
+
+.pip-status-background_processing {
+    background: #d1ecf1;
+    color: #0c5460;
+    border: 1px solid #bee5eb;
+}
+
+.pip-status-background-processing {
+    background: #d1ecf1;
+    color: #0c5460;
+    border: 1px solid #bee5eb;
+}
+
+/* 操作按钮 */
+.pip-action-button {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    border: 1px solid #e4e6ea;
+    background: white;
+    color: #717171;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.3s ease;
+    cursor: pointer;
+    font-size: 16px;
+}
+
+.pip-action-button:hover {
+    border-color: #ff5a5f;
+    color: #ff5a5f;
+    background: #fff5f5;
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(255, 90, 95, 0.2);
+}
+
+.pip-action-button.primary {
+    background: #ff5a5f;
+    color: white;
+    border-color: #ff5a5f;
+}
+
+.pip-action-button.primary:hover {
+    background: #e74c3c;
+    border-color: #e74c3c;
+}
+
+/* 任务进度 */
+.pip-job-progress {
+    min-width: 180px;
+}
+
+.pip-job-progress-text {
+    font-size: 14px;
+    color: #495057;
+    margin-bottom: 8px;
+    font-weight: 500;
+}
+
+.pip-job-progress-bar {
+    width: 100%;
+    height: 6px;
+    background: #f0f0f0;
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.pip-job-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #27ae60, #2ecc71);
+    border-radius: 3px;
+    transition: width 0.4s ease;
+}
+
+/* 空状态 */
+.pip-empty-state {
+    text-align: center;
+    padding: 80px 40px;
+    color: #717171;
+}
+
+.pip-empty-state-icon {
+    width: 80px;
+    height: 80px;
+    margin: 0 auto 24px;
+    background: #f8f9fa;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    color: #dee2e6;
+}
+
+.pip-empty-state h3 {
+    font-size: 20px;
+    font-weight: 600;
+    color: #495057;
+    margin: 0 0 8px 0;
+}
+
+.pip-empty-state p {
+    font-size: 16px;
+    color: #717171;
+    margin: 0;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+    .pip-container {
+        padding: 0 16px;
+    }
+    
+    .pip-batch-controls {
+        grid-template-columns: 1fr;
+    }
+    
+    .pip-global-settings {
+        grid-template-columns: 1fr;
+    }
+    
+    .pip-jobs-stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    
+    .pip-drop-zone {
+        padding: 40px 20px;
+        margin: 16px;
+    }
+    
+    .pip-card-content {
+        padding: 0 16px 16px 16px;
+    }
+}
+
+@media (max-width: 480px) {
+    .pip-jobs-stats {
+        grid-template-columns: 1fr;
+    }
+    
+    .wrap h1 {
+        font-size: 24px;
+    }
+    
+    .pip-card-title {
+        font-size: 18px;
+    }
+}
+
+/* 批量操作样式 */
+.pip-bulk-actions {
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 6px;
+    padding: 12px;
+    margin-bottom: 15px;
+}
+
+.pip-bulk-action-btn {
+    padding: 6px 12px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    transition: all 0.2s ease;
+}
+
+.pip-bulk-action-btn:hover {
+    opacity: 0.9;
+    transform: translateY(-1px);
+}
+
+.pip-bulk-action-btn .dashicons {
+    font-size: 16px;
+    line-height: 1;
+}
+
+.pip-selected-count {
+    font-weight: 600;
+    color: #495057;
+    margin-right: 10px;
+}
+
+/* 多选框样式 */
+.pip-job-checkbox,
+#pip-select-all-jobs {
+    transform: scale(1.2);
+    margin: 0;
+}
+
+/* 扫描按钮特殊样式 */
+#pip-scan-files {
+    background: linear-gradient(135deg, #28a745, #20c997) !important;
+    border-color: #28a745 !important;
+    color: white !important;
+    box-shadow: 0 2px 4px rgba(40, 167, 69, 0.3);
+}
+
+#pip-scan-files:hover {
+    background: linear-gradient(135deg, #218838, #1ea085) !important;
+    box-shadow: 0 4px 8px rgba(40, 167, 69, 0.4);
+}
+
+/* 处理模式选择器样式 */
+#pip-processing-mode {
+    min-width: 150px;
+    padding: 6px 10px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    background: white;
+}
+
+/* 状态徽章增强 */
+.pip-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.pip-status-badge.pip-status-pending {
+    background: #fff3cd;
+    color: #856404;
+    border: 1px solid #ffeaa7;
+}
+
+.pip-status-badge.pip-status-running {
+    background: #d1ecf1;
+    color: #0c5460;
+    border: 1px solid #bee5eb;
+    animation: pulse 2s infinite;
+}
+
+.pip-status-badge.pip-status-completed {
+    background: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+}
+
+.pip-status-badge.pip-status-failed {
+    background: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+}
+
+.pip-status-badge.pip-status-paused {
+    background: #e2e3e5;
+    color: #383d41;
+    border: 1px solid #d6d8db;
+}
+
+.pip-status-badge.pip-status-cancelled {
+    background: #e2e3e5;
+    color: #6c757d;
+    border: 1px solid #d6d8db;
+    text-decoration: line-through;
+}
+
+.pip-status-badge.pip-status-validated {
+    background: #d1ecf1;
+    color: #0c5460;
+    border: 1px solid #bee5eb;
+}
+
+.pip-status-badge.pip-status-background_processing {
+    background: #e7f3ff;
+    color: #004085;
+    border: 1px solid #b3d7ff;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.7; }
+    100% { opacity: 1; }
+}
+
+/* 表格行悬停效果 */
+.pip-jobs-table tbody tr:hover {
+    background-color: #f8f9fa;
+}
+
+.pip-jobs-table tbody tr:hover .pip-job-checkbox {
+    opacity: 1;
+}
+
+.pip-job-checkbox {
+    opacity: 0.6;
+    transition: opacity 0.2s ease;
+}
+
+/* 空状态样式增强 */
+.pip-empty-state {
+    text-align: center;
+    padding: 40px 20px;
+    color: #6c757d;
+}
+
+.pip-empty-state-icon .dashicons {
+    font-size: 48px;
+    color: #dee2e6;
+    margin-bottom: 15px;
+}
+
+.pip-empty-state h3 {
+    margin: 15px 0 10px;
+    color: #495057;
+    font-weight: 600;
+}
+
+.pip-empty-state p {
+    margin: 0;
+    font-size: 14px;
+}
+
+/* 响应式优化 */
+@media (max-width: 768px) {
+    .pip-batch-controls {
+        flex-direction: column;
+        gap: 10px;
+    }
+    
+    .pip-global-settings {
+        flex-direction: column;
+        margin-left: 0;
+        margin-top: 15px;
+    }
+    
+    .pip-bulk-actions > div {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    
+    .pip-bulk-action-btn {
+        font-size: 12px;
+        padding: 5px 10px;
+    }
+} 
