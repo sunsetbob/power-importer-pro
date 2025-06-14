@@ -1,17 +1,19 @@
 <?php
 /**
- * AJAX分片处理器类 - Refactored for wp_remote_post async processing only.
- * Implements chunked import and batch processing.
+ * AJAX分片处理器类 - Refactored for wp_remote_post async processing
+ * Implements断点续传和批量处理功能
  */
 if (!defined('ABSPATH')) exit;
 
 class PIP_Ajax_Processor {
-
-    const BATCH_SIZE = 10; // Number of rows to process per batch in AJAX mode
-    const PROCESS_DELAY = 1000; // Delay between AJAX batches in milliseconds
+    
+    const BATCH_SIZE = 10; // 每批处理的行数
+    const PROCESS_DELAY = 1000; // 批次间延迟(毫秒)
+    const ASYNC_TIMEOUT_SECONDS = 300; // 后台异步处理的超时时间
+    const ASYNC_MEMORY_LIMIT = '512M'; // 后台异步处理的内存限制
 
     public function __construct() {
-        // Register AJAX hooks for frontend interactions
+        // 注册AJAX钩子
         add_action('wp_ajax_pip_start_batch_import', [$this, 'start_batch_import']);
         add_action('wp_ajax_pip_process_batch', [$this, 'process_batch']);
         add_action('wp_ajax_pip_pause_import', [$this, 'pause_import']);
@@ -19,565 +21,554 @@ class PIP_Ajax_Processor {
         add_action('wp_ajax_pip_cancel_import', [$this, 'cancel_import']);
         add_action('wp_ajax_pip_get_import_status', [$this, 'get_import_status']);
         add_action('wp_ajax_pip_validate_csv', [$this, 'validate_csv']);
-
-        // Hooks for background processing via wp_remote_post
+        
+        // Background processing hooks
         add_action('wp_ajax_pip_enable_background_mode', [$this, 'enable_background_mode']);
-        add_action('wp_ajax_nopriv_pip_async_background_process', [$this, 'async_background_process']); // Nopriv for loopback
-        add_action('wp_ajax_pip_async_background_process', [$this, 'async_background_process']);
+        add_action('wp_ajax_pip_async_background_process', [$this, 'async_background_process']); // Target for wp_remote_post
+        // Removed WP-Cron and Heartbeat related hooks
     }
-
+    
     /**
-     * Validates CSV file format and structure.
-     */
-    public function validate_csv() {
-        check_ajax_referer('pip_ajax_nonce', 'nonce');
-
-        if (!current_user_can('manage_woocommerce')) {
-            wp_send_json_error(['message' => 'Permission denied.']);
-            return;
-        }
-
-        $job_id = intval($_POST['job_id'] ?? 0);
-        if (!$job_id) {
-            wp_send_json_error(['message' => 'Invalid job ID.']);
-            return;
-        }
-
-        $job = pip_db()->get_job($job_id);
-        if (!$job || empty($job->file_path) || !file_exists($job->file_path)) {
-            wp_send_json_error(['message' => 'File not found for the job.']);
-            return;
-        }
-
-        try {
-            $validation_result = $this->validate_csv_file($job->file_path);
-
-            pip_db()->update_job($job_id, [
-                'total_rows' => $validation_result['total_rows'],
-                'status' => 'validated' // Status indicating CSV is valid and ready for import
-            ]);
-
-            pip_db()->add_log($job_id, 'CSV validation completed successfully.', 'INFO');
-            wp_send_json_success([
-                'message' => 'CSV validation completed.',
-                'data' => $validation_result
-            ]);
-
-        } catch (Exception $e) {
-            pip_db()->add_log($job_id, 'CSV validation failed: ' . $e->getMessage(), 'ERROR');
-            wp_send_json_error(['message' => $e->getMessage()]);
-        }
-    }
-
-    /**
-     * Starts the AJAX-driven batch import process.
-     */
-    public function start_batch_import() {
-        check_ajax_referer('pip_ajax_nonce', 'nonce');
-
-        if (!current_user_can('manage_woocommerce')) {
-            wp_send_json_error(['message' => 'Permission denied.']);
-            return;
-        }
-
-        $job_id = intval($_POST['job_id'] ?? 0);
-        if (!$job_id) {
-            wp_send_json_error(['message' => 'Invalid job ID.']);
-            return;
-        }
-
-        $job = pip_db()->get_job($job_id);
-        if (!$job || !in_array($job->status, ['validated', 'paused'])) {
-            $status = $job ? $job->status : 'unknown';
-            wp_send_json_error(['message' => "Cannot start import. Job status is '{$status}'. Expected 'validated' or 'paused'."]);
-            return;
-        }
-
-        pip_db()->update_job($job_id, [
-            'status' => 'running_ajax', // Status for browser-driven AJAX processing
-            'started_at' => current_time('mysql', 1)
-        ]);
-
-        pip_db()->add_log($job_id, 'AJAX batch import started.', 'INFO');
-        wp_send_json_success(['message' => 'Import started via AJAX processing.']);
-    }
-
-    /**
-     * Processes a single batch of CSV data during AJAX import.
-     */
-    public function process_batch() {
-        check_ajax_referer('pip_ajax_nonce', 'nonce');
-
-        if (!current_user_can('manage_woocommerce')) {
-            wp_send_json_error(['message' => 'Permission denied.']);
-            return;
-        }
-
-        $job_id = intval($_POST['job_id'] ?? 0);
-        $batch_size = intval($_POST['batch_size'] ?? self::BATCH_SIZE);
-
-        if (!$job_id) {
-            wp_send_json_error(['message' => 'Invalid job ID.']);
-            return;
-        }
-
-        $job = pip_db()->get_job($job_id);
-        if (!$job || $job->status !== 'running_ajax') {
-            $status = $job ? $job->status : 'unknown';
-            wp_send_json_error(['message' => "Job not ready for AJAX batch processing (status: {$status})."]);
-            return;
-        }
-
-        try {
-            // $job->processed_rows is the authoritative starting point for this batch
-            $result = $this->process_csv_batch($job, $job->processed_rows, $batch_size);
-
-            $new_total_processed = $job->processed_rows + $result['processed'];
-            pip_db()->update_job($job_id, ['processed_rows' => $new_total_processed]);
-
-            $is_complete = ($new_total_processed >= $job->total_rows);
-            if ($is_complete) {
-                pip_db()->update_job($job_id, [
-                    'status' => 'completed',
-                    'finished_at' => current_time('mysql', 1)
-                ]);
-                pip_db()->add_log($job_id, 'AJAX import completed successfully.', 'SUCCESS');
-            }
-
-            wp_send_json_success([
-                'processed' => $result['processed'],
-                'errors' => $result['errors'],
-                'total_processed' => $new_total_processed,
-                'is_complete' => $is_complete,
-                'next_start_row' => $new_total_processed
-            ]);
-
-        } catch (Exception $e) {
-            pip_db()->add_log($job_id, 'AJAX batch processing error: ' . $e->getMessage(), 'ERROR');
-            pip_db()->update_job($job_id, ['status' => 'failed', 'error_message' => $e->getMessage()]);
-            wp_send_json_error(['message' => $e->getMessage()]);
-        }
-    }
-
-    /**
-     * Enables background processing mode (now only uses async wp_remote_post).
+     * 启用后台处理模式 - 简化为仅使用 wp_remote_post 异步方法
      */
     public function enable_background_mode() {
         check_ajax_referer('pip_ajax_nonce', 'nonce');
-
+        
         if (!current_user_can('manage_woocommerce')) {
-            pip_db()->add_log(0, 'Enable background mode: Permission denied.', 'ERROR');
-            wp_send_json_error(['message' => 'Permission denied.']);
+            wp_send_json_error(['message' => __('Permission denied.', 'power-importer-pro')]);
             return;
         }
-
-        $job_id = intval($_POST['job_id'] ?? 0);
+        
+        $job_id = isset($_POST['job_id']) ? absint($_POST['job_id']) : 0;
         if (!$job_id) {
-            pip_db()->add_log(0, 'Enable background mode: Invalid job ID provided.', 'ERROR');
-            wp_send_json_error(['message' => 'Invalid job ID.']);
+            wp_send_json_error(['message' => __('Invalid job ID.', 'power-importer-pro')]);
             return;
         }
 
         $job = pip_db()->get_job($job_id);
         if (!$job) {
-            pip_db()->add_log($job_id, 'Enable background mode: Job not found.', 'ERROR');
-            wp_send_json_error(['message' => 'Job not found.']);
+            wp_send_json_error(['message' => __('Job not found.', 'power-importer-pro')]);
             return;
         }
 
         // Prevent re-queueing if already processing or finished
-        $non_requeueable_statuses = ['queued_async', 'running_async', 'completed', 'failed', 'cancelled'];
+        $non_requeueable_statuses = ['queued_async', 'running_async', 'completed', 'failed'];
         if (in_array($job->status, $non_requeueable_statuses)) {
-            pip_db()->add_log($job_id, "Enable background mode: Job status '{$job->status}' prevents re-queueing.", 'WARNING');
-            wp_send_json_error(['message' => "Job is already processing, scheduled, or finished ({$job->status})."]);
+            pip_db()->add_log($job_id, sprintf(__('Attempt to enable background mode for job in status '%s' was prevented.', 'power-importer-pro'), $job->status), 'WARNING');
+            wp_send_json_error(['message' => sprintf(__('Job is already processing, scheduled, or finished (%s).', 'power-importer-pro'), $job->status)]);
             return;
         }
+        
+        pip_db()->update_job($job_id, [
+            'status' => 'queued_async',
+            'started_at' => current_time('mysql', 1) // Mark when background mode was enabled/re-enabled
+        ]);
+        
+        pip_db()->add_log($job_id, __('Job queued for background processing via async request.', 'power-importer-pro'), 'INFO');
 
-        // Directly attempt to trigger async background process
-        $trigger_success = $this->immediate_background_process($job_id);
-
-        if ($trigger_success) {
-            // Status is set to 'queued_async' by immediate_background_process
-            pip_db()->add_log($job_id, 'Background processing initiated via Async remote post.', 'INFO');
-            wp_send_json_success([
-                'message' => 'Background processing initiated.',
-                'mode' => 'async', // Explicitly state the mode
-                'status' => 'queued_async'
-            ]);
-        } else {
-            // Error logged and status set to 'failed' by immediate_background_process
-            wp_send_json_error([
-                'message' => 'Failed to initiate background processing. Check plugin logs.',
-                'mode' => 'async',
-                'status' => 'failed'
-            ]);
-        }
+        // Trigger the immediate background process
+        $this->immediate_background_process($job_id); // This function will send its own JSON response
     }
-
+    
     /**
-     * Initiates the non-blocking wp_remote_post call for async background processing.
-     * Updates job status to 'queued_async' or 'failed'.
-     * Returns true on successful trigger attempt, false on failure.
+     * 立即后台处理（使用 wp_remote_post 异步调用）
      */
     private function immediate_background_process($job_id) {
-        pip_db()->update_job($job_id, ['status' => 'queued_async']);
-        pip_db()->add_log($job_id, 'Async process: Attempting to trigger. Status set to queued_async.', 'INFO');
+        $async_nonce = wp_create_nonce('pip_async_bg_nonce');
 
-        $nonce = wp_create_nonce('pip_async_bg_nonce');
+        $body = [
+            'action' => 'pip_async_background_process',
+            'job_id' => $job_id,
+            '_ajax_nonce'  => $async_nonce, // Use _ajax_nonce for check_ajax_referer in the target
+        ];
+
         $url = admin_url('admin-ajax.php');
         $args = [
-            'timeout'   => 1, // Very short, effectively non-blocking
-            'blocking'  => false, // Crucial for non-blocking behavior
+            'timeout'   => 1, // Very short timeout, just to dispatch
+            'blocking'  => false, // Makes the request non-blocking
+            'body'      => $body,
             'sslverify' => apply_filters('https_local_ssl_verify', false),
-            'body'      => [
-                'action'   => 'pip_async_background_process',
-                'job_id'   => $job_id,
-                '_ajax_nonce' => $nonce // Pass nonce in body for check_ajax_referer
-            ]
+            'cookies'   => $_COOKIE // Pass along cookies for authentication if needed by the AJAX handler
         ];
 
         $response = wp_remote_post($url, $args);
 
         if (is_wp_error($response)) {
             $error_message = $response->get_error_message();
-            pip_db()->add_log($job_id, "Async process trigger failed: WP_Error - {$error_message}", 'ERROR');
-            pip_db()->update_job($job_id, ['status' => 'failed', 'error_message' => "Failed to trigger async process: {$error_message}"]);
-            return false;
+            pip_db()->add_log($job_id, sprintf(__('Failed to dispatch async background process. WP_Error: %s', 'power-importer-pro'), $error_message), 'ERROR');
+            pip_db()->update_job($job_id, ['status' => 'failed', 'error_message' => sprintf(__('Failed to dispatch background task: %s', 'power-importer-pro'), $error_message)]);
+            wp_send_json_error([
+                'message' => sprintf(__('Failed to dispatch background task: %s', 'power-importer-pro'), $error_message),
+                'job_status_updated' => true // Status was updated to failed
+            ]);
+            return;
         }
 
-        // For non-blocking requests, a 200 response isn't guaranteed.
-        // The main thing is that the request was made without a wp_error.
-        $response_code = wp_remote_retrieve_response_code($response);
-        pip_db()->add_log($job_id, "Async process successfully triggered via wp_remote_post (HTTP response code: {$response_code}).", 'INFO');
-        return true;
+        // For non-blocking, we might not get a 200, but we shouldn't get a WP_Error.
+        // The actual success/failure of the job will be handled by the async process itself.
+        pip_db()->add_log($job_id, __('Async background process successfully dispatched.', 'power-importer-pro'), 'INFO');
+        wp_send_json_success([
+            'message' => __('Background processing initiated. The job will run on the server.', 'power-importer-pro'),
+            'job_id' => $job_id,
+            'status' => 'queued_async' // Confirming the new status
+        ]);
     }
-
+    
     /**
-     * Handles the actual background processing logic, called by wp_remote_post.
+     * 异步后台处理 - Target for wp_remote_post
+     * This function runs the actual import.
      */
     public function async_background_process() {
-        $job_id = intval($_POST['job_id'] ?? 0);
-
-        // Use check_ajax_referer for nonce validation from POST body
+        // Nonce is checked in the body of the request
         check_ajax_referer('pip_async_bg_nonce', '_ajax_nonce');
-        // If nonce fails, check_ajax_referer will wp_die(), so no need for further checks here.
-
+        
+        $job_id = isset($_POST['job_id']) ? absint($_POST['job_id']) : 0;
         if (!$job_id) {
-            pip_db()->add_log(0, 'Async process: Invalid or missing job ID after nonce check.', 'ERROR');
-            wp_send_json_error(['message' => 'Invalid job ID.'], 400); // Should not happen if nonce is good
-            wp_die();
+            error_log('Power Importer Pro: Invalid job ID for async background process.');
+            wp_send_json_error(['message' => __('Invalid job ID for async process.', 'power-importer-pro')], 400);
+            wp_die(); // Important to die to prevent further execution
         }
 
-        ignore_user_abort(true);
-        set_time_limit(apply_filters('pip_background_process_time_limit', 300)); // 5 minutes, filterable
-        ini_set('memory_limit', apply_filters('pip_background_process_memory_limit', '512M'));
+        // Ensure user has permission, even though it's a server-to-server call, it's good practice
+        if (!current_user_can('manage_woocommerce')) {
+             pip_db()->add_log($job_id, __('Permission denied for async background process.', 'power-importer-pro'), 'ERROR');
+             wp_send_json_error(['message' => __('Permission denied.', 'power-importer-pro')], 403);
+             wp_die();
+        }
 
-        pip_db()->update_job($job_id, ['status' => 'running_async', 'started_at' => current_time('mysql', 1)]);
-        pip_db()->add_log($job_id, 'Async background process started execution.', 'INFO');
+        ignore_user_abort(true); 
+        set_time_limit(apply_filters('pip_async_process_time_limit', self::ASYNC_TIMEOUT_SECONDS)); 
+        ini_set('memory_limit', self::ASYNC_MEMORY_LIMIT);
+
+        pip_db()->update_job($job_id, ['status' => 'running_async']);
+        pip_db()->add_log($job_id, __('Async background process started execution.', 'power-importer-pro'), 'INFO');
 
         try {
-            $this->background_process_job($job_id);
-            // background_process_job handles its own completion/failure status updates.
+            $this->background_process_job_logic($job_id); 
         } catch (Throwable $e) { // Catch PHP 7+ Errors and Exceptions
-            $error_message = $e->getMessage() . " in " . $e->getFile() . " on line " . $e->getLine();
-            pip_db()->add_log($job_id, "Async background process critical error: {$error_message}", 'CRITICAL');
-            pip_db()->update_job($job_id, [
-                'status' => 'failed',
-                'finished_at' => current_time('mysql', 1),
-                'error_message' => "Critical Error: {$error_message}"
-            ]);
+            $error_message = sprintf(__( 'Critical error in async background process for job #%d: %s', 'power-importer-pro' ), $job_id, $e->getMessage());
+            error_log("Power Importer Pro: " . $error_message); // Server log for deeper debugging
+            pip_db()->add_log($job_id, $error_message, 'CRITICAL');
+            pip_db()->update_job($job_id, ['status' => 'failed', 'finished_at' => current_time('mysql', 1), 'error_message' => $error_message]);
         }
-
-        // End the process cleanly. If background_process_job completed, it would have set status.
-        // If it failed catastrophically and didn't update DB, job might remain 'running_async'.
-        // A separate sweeper mechanism might be needed for such stuck jobs in a production plugin.
-        wp_die('PIP Async Process Completed.');
+        
+        wp_die(); // Important to terminate the AJAX handler properly
     }
-
+    
     /**
-     * Core background processing task for a job.
-     * Called by async_background_process.
+     * 验证CSV文件格式 (AJAX Action)
      */
-    public function background_process_job($job_id) {
+    public function validate_csv() {
+        check_ajax_referer('pip_ajax_nonce', 'nonce');
+        
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => __('Permission denied.', 'power-importer-pro')]);
+            return;
+        }
+        
+        $job_id = isset($_POST['job_id']) ? absint($_POST['job_id']) : 0;
+        if (!$job_id) {
+            wp_send_json_error(['message' => __('Invalid job ID.', 'power-importer-pro')]);
+            return;
+        }
+        
         $job = pip_db()->get_job($job_id);
-
-        if (!$job) {
-            pip_db()->add_log($job_id, 'Background process job: Job not found.', 'ERROR');
+        if (!$job || empty($job->file_path) || !file_exists($job->file_path)) {
+            $error_msg = sprintf(__('File not found for job ID %d. Path: %s', 'power-importer-pro'), $job_id, esc_html($job->file_path ?? 'N/A'));
+            pip_db()->add_log($job_id, $error_msg, 'ERROR');
+            wp_send_json_error(['message' => $error_msg]);
             return;
         }
-
-        if ($job->status === 'cancelled') {
-            pip_db()->add_log($job_id, 'Background process job: Job was cancelled. Aborting.', 'INFO');
-            return;
-        }
-
-        // Double check status, should be 'running_async'
-        if ($job->status !== 'running_async') {
-             pip_db()->add_log($job_id, "Background process job: Expected status 'running_async', got '{$job->status}'. Proceeding cautiously.", 'WARNING');
-        }
-
-        // Time limits should be set by the caller (async_background_process)
-        // set_time_limit(apply_filters('pip_background_job_time_limit', 300));
-        // ini_set('memory_limit', apply_filters('pip_background_job_memory_limit', '512M'));
-
-        pip_db()->add_log($job_id, 'Background process job: Starting full import.', 'INFO');
-
+        
         try {
-            if (!class_exists('PIP_Importer')) {
-                throw new Exception('PIP_Importer class not found.');
-            }
-            $importer = new PIP_Importer($job->file_path, $job_id);
-            // Importer->run() should handle the entire import process,
-            // update processed_rows, and set status to 'completed' or 'failed'.
-            $importer->run();
-
-            // Check final status set by importer
-            $final_job_status = pip_db()->get_job_field($job_id, 'status');
-            if ($final_job_status === 'running_async') {
-                // Importer finished but didn't set a final status. This is a fallback.
-                pip_db()->add_log($job_id, "Background process job: Importer finished but status still 'running_async'. Marking as 'failed' to avoid stuck jobs.", 'WARNING');
-                pip_db()->update_job($job_id, [
-                    'status' => 'failed',
-                    'finished_at' => current_time('mysql', 1),
-                    'error_message' => 'Import process completed without explicit success status.'
-                ]);
-            } elseif ($final_job_status === 'completed') {
-                pip_db()->add_log($job_id, 'Background process job: Import completed successfully by importer.', 'SUCCESS');
-            } else {
-                 pip_db()->add_log($job_id, "Background process job: Import finished by importer. Final status: {$final_job_status}", 'INFO');
-            }
-
-        } catch (Throwable $e) { // Catch PHP 7+ Errors and Exceptions
-            $error_message = $e->getMessage() . " in " . $e->getFile() . " on line " . $e->getLine();
-            pip_db()->add_log($job_id, "Background process job error: {$error_message}", 'ERROR');
+            $validation_result = $this->validate_csv_file_contents($job->file_path);
+            
             pip_db()->update_job($job_id, [
-                'status' => 'failed',
-                'finished_at' => current_time('mysql', 1),
-                'error_message' => $error_message
+                'total_rows' => $validation_result['total_rows'],
+                'status' => 'validated'
             ]);
+            pip_db()->add_log($job_id, sprintf(__('CSV validation completed. Total data rows: %d', 'power-importer-pro'), $validation_result['total_rows']), 'INFO');
+            
+            wp_send_json_success([
+                'message' => __('CSV validation successful.', 'power-importer-pro'),
+                'data' => $validation_result
+            ]);
+            
+        } catch (Exception $e) {
+            pip_db()->add_log($job_id, sprintf(__('CSV validation failed: %s', 'power-importer-pro'), $e->getMessage()), 'ERROR');
+            pip_db()->update_job($job_id, ['status' => 'failed', 'error_message' => $e->getMessage()]);
+            wp_send_json_error(['message' => $e->getMessage()]);
         }
     }
-
+    
     /**
-     * Pauses an AJAX-driven import.
+     * 开始批量导入 (AJAX Action for foreground processing)
+     */
+    public function start_batch_import() {
+        check_ajax_referer('pip_ajax_nonce', 'nonce');
+        
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => __('Permission denied.', 'power-importer-pro')]);
+            return;
+        }
+        
+        $job_id = isset($_POST['job_id']) ? absint($_POST['job_id']) : 0;
+        if (!$job_id) {
+            wp_send_json_error(['message' => __('Invalid job ID.', 'power-importer-pro')]);
+            return;
+        }
+
+        $job = pip_db()->get_job($job_id);
+        if (!$job) {
+            wp_send_json_error(['message' => __('Job not found.', 'power-importer-pro')]);
+            return;
+        }
+
+        // Allow starting from 'pending', 'validated', 'paused', or even 'failed'/'cancelled' (implicitly a retry)
+        $allowed_statuses = ['pending', 'validated', 'paused', 'failed', 'cancelled', 'uploaded'];
+        if (!in_array($job->status, $allowed_statuses)) {
+            wp_send_json_error(['message' => sprintf(__('Job cannot be started from current status: %s', 'power-importer-pro'), $job->status)]);
+            return;
+        }
+        
+        pip_db()->update_job($job_id, [
+            'status' => 'running_ajax', 
+            'started_at' => current_time('mysql', 1),
+            'processed_rows' => 0, // Reset progress for a new run/retry
+            'finished_at' => null, // Clear finished time
+            'error_message' => null // Clear previous errors
+        ]);
+        
+        pip_db()->add_log($job_id, __('Foreground AJAX import process started.', 'power-importer-pro'), 'INFO');
+        
+        wp_send_json_success(['message' => __('Import process started (AJAX mode).', 'power-importer-pro'), 'job_id' => $job_id, 'status' => 'running_ajax']);
+    }
+    
+    /**
+     * 处理单个批次 (AJAX Action for foreground processing)
+     */
+    public function process_batch() {
+        check_ajax_referer('pip_ajax_nonce', 'nonce');
+        
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => __('Permission denied.', 'power-importer-pro')]);
+            return;
+        }
+        
+        $job_id = isset($_POST['job_id']) ? absint($_POST['job_id']) : 0;
+        $start_row = isset($_POST['start_row']) ? absint($_POST['start_row']) : 0; // This is the count of already processed rows (offset)
+        $batch_size = isset($_POST['batch_size']) ? absint($_POST['batch_size']) : self::BATCH_SIZE;
+        
+        if (!$job_id) {
+            wp_send_json_error(['message' => __('Invalid job ID.', 'power-importer-pro')]);
+            return;
+        }
+        
+        $job = pip_db()->get_job($job_id);
+        if (!$job) {
+            wp_send_json_error(['message' => __('Job not found.', 'power-importer-pro')]);
+            return;
+        }
+
+        if ($job->status !== 'running_ajax') {
+            pip_db()->add_log($job_id, sprintf(__('Batch processing attempted but job status is %s, not running_ajax.', 'power-importer-pro'), $job->status), 'WARNING');
+            wp_send_json_error(['message' => sprintf(__('Job not in a running state for AJAX processing. Current status: %s', 'power-importer-pro'), $this->get_status_label($job->status)), 'status' => $job->status]);
+            return;
+        }
+        
+        try {
+            $result = $this->process_csv_batch_rows($job, $start_row, $batch_size);
+            
+            $new_processed_count = $start_row + $result['processed_in_this_batch'];
+            pip_db()->update_job($job_id, ['processed_rows' => $new_processed_count]);
+            
+            $is_complete = ($job->total_rows > 0 && $new_processed_count >= $job->total_rows);
+            
+            if ($is_complete) {
+                pip_db()->update_job($job_id, [
+                    'status' => 'completed',
+                    'finished_at' => current_time('mysql', 1)
+                ]);
+                pip_db()->add_log($job_id, __('AJAX Import completed successfully.', 'power-importer-pro'), 'SUCCESS');
+            }
+            
+            wp_send_json_success([
+                'processed' => $result['processed_in_this_batch'],
+                'errors' => $result['errors_in_this_batch'],
+                'total_processed_so_far' => $new_processed_count,
+                'is_complete' => $is_complete,
+                'next_start_row' => $new_processed_count // The next offset
+            ]);
+            
+        } catch (Exception $e) {
+            $error_msg = $e->getMessage();
+            pip_db()->add_log($job_id, sprintf(__('AJAX Batch processing error: %s', 'power-importer-pro'), $error_msg), 'ERROR');
+            pip_db()->update_job($job_id, ['status' => 'failed', 'error_message' => $error_msg, 'finished_at' => current_time('mysql', 1)]);
+            wp_send_json_error(['message' => $error_msg]);
+        }
+    }
+    
+    /**
+     * 暂停导入 (AJAX Action for foreground processing)
      */
     public function pause_import() {
         check_ajax_referer('pip_ajax_nonce', 'nonce');
-        $job_id = intval($_POST['job_id'] ?? 0);
-        if (!$job_id) {
-            wp_send_json_error(['message' => 'Invalid job ID.']);
-            return;
-        }
+        $job_id = isset($_POST['job_id']) ? absint($_POST['job_id']) : 0;
+        if (!$job_id) { wp_send_json_error(['message' => __('Invalid job ID.', 'power-importer-pro')]); return; }
 
         $job = pip_db()->get_job($job_id);
         if ($job && $job->status === 'running_ajax') {
             pip_db()->update_job($job_id, ['status' => 'paused']);
-            pip_db()->add_log($job_id, 'AJAX import paused by user.', 'INFO');
-            wp_send_json_success(['message' => 'Import paused.']);
+            pip_db()->add_log($job_id, __('AJAX Import paused by user.', 'power-importer-pro'), 'INFO');
+            wp_send_json_success(['message' => __('Import paused.', 'power-importer-pro'), 'new_status' => 'paused']);
         } else {
-            $status = $job ? $job->status : 'unknown';
-            pip_db()->add_log($job_id, "Attempt to pause non-AJAX running job. Status: {$status}", 'WARNING');
-            wp_send_json_error(['message' => "Import cannot be paused (current status: {$status})."]);
+            wp_send_json_error(['message' => __('Job cannot be paused. Not currently in AJAX running state.', 'power-importer-pro')]);
         }
     }
-
+    
     /**
-     * Resumes a paused AJAX-driven import.
+     * 恢复导入 (AJAX Action for foreground processing)
      */
     public function resume_import() {
         check_ajax_referer('pip_ajax_nonce', 'nonce');
-        $job_id = intval($_POST['job_id'] ?? 0);
-        if (!$job_id) {
-            wp_send_json_error(['message' => 'Invalid job ID.']);
-            return;
-        }
-
+        $job_id = isset($_POST['job_id']) ? absint($_POST['job_id']) : 0;
+        if (!$job_id) { wp_send_json_error(['message' => __('Invalid job ID.', 'power-importer-pro')]); return; }
+        
         $job = pip_db()->get_job($job_id);
         if ($job && $job->status === 'paused') {
             pip_db()->update_job($job_id, ['status' => 'running_ajax']);
-            pip_db()->add_log($job_id, 'AJAX import resumed by user.', 'INFO');
-            wp_send_json_success(['message' => 'Import resumed.']);
+            pip_db()->add_log($job_id, __('AJAX Import resumed by user.', 'power-importer-pro'), 'INFO');
+            wp_send_json_success(['message' => __('Import resumed.', 'power-importer-pro'), 'new_status' => 'running_ajax']);
         } else {
-            $status = $job ? $job->status : 'unknown';
-            pip_db()->add_log($job_id, "Attempt to resume non-paused job. Status: {$status}", 'WARNING');
-            wp_send_json_error(['message' => "Import cannot be resumed (current status: {$status})."]);
+            wp_send_json_error(['message' => __('Job cannot be resumed. Not currently paused.', 'power-importer-pro')]);
         }
     }
-
+    
     /**
-     * Cancels an import job.
+     * 取消导入 (AJAX Action)
      */
     public function cancel_import() {
         check_ajax_referer('pip_ajax_nonce', 'nonce');
-        $job_id = intval($_POST['job_id'] ?? 0);
-        if (!$job_id) {
-            wp_send_json_error(['message' => 'Invalid job ID.']);
-            return;
-        }
-
-        $job = pip_db()->get_job($job_id);
-        // Define statuses from which a job can be cancelled
-        $cancellable_statuses = ['pending', 'validated', 'running_ajax', 'paused', 'queued_async', 'running_async'];
-
-        if ($job && in_array($job->status, $cancellable_statuses)) {
-            $original_status = $job->status;
-            pip_db()->update_job($job_id, [
-                'status' => 'cancelled',
-                'finished_at' => current_time('mysql', 1),
-                'error_message' => 'Import cancelled by user.'
-            ]);
-            pip_db()->add_log($job_id, "Import cancelled by user. Original status: {$original_status}.", 'INFO');
-            wp_send_json_success(['message' => 'Import cancelled.']);
-        } else {
-            $status = $job ? $job->status : 'unknown';
-            pip_db()->add_log($job_id, "Attempt to cancel job in invalid state. Status: {$status}", 'WARNING');
-            wp_send_json_error(['message' => "Import cannot be cancelled at this stage (current status: {$status})."]);
-        }
+        $job_id = isset($_POST['job_id']) ? absint($_POST['job_id']) : 0;
+        if (!$job_id) { wp_send_json_error(['message' => __('Invalid job ID.', 'power-importer-pro')]); return; }
+        
+        pip_db()->update_job($job_id, [
+            'status' => 'cancelled',
+            'finished_at' => current_time('mysql', 1)
+        ]);
+        pip_db()->add_log($job_id, __('Import cancelled by user.', 'power-importer-pro'), 'INFO');
+        wp_send_json_success(['message' => __('Import cancelled.', 'power-importer-pro'), 'new_status' => 'cancelled']);
     }
-
+    
     /**
-     * Gets the current status of an import job.
+     * 获取导入状态 (AJAX Action)
      */
     public function get_import_status() {
-        check_ajax_referer('pip_ajax_nonce', 'nonce');
-        $job_id = intval($_POST['job_id'] ?? 0);
-        if (!$job_id) {
-            wp_send_json_error(['message' => 'Invalid job ID.']);
-            return;
-        }
-
+        check_ajax_referer('pip_ajax_nonce', 'nonce'); 
+        $job_id = isset($_POST['job_id']) ? absint($_POST['job_id']) : 0;
+        if (!$job_id) { wp_send_json_error(['message' => __('Invalid job ID.', 'power-importer-pro')]); return; }
+        
         $job = pip_db()->get_job($job_id);
-        if (!$job) {
-            wp_send_json_error(['message' => 'Job not found.']);
-            return;
-        }
-
-        $progress = ($job->total_rows > 0) ? round(($job->processed_rows / $job->total_rows) * 100, 2) : 0;
-
+        if (!$job) { wp_send_json_error(['message' => __('Job not found.', 'power-importer-pro')]); return; }
+        
+        $progress = ($job->total_rows > 0 && is_numeric($job->processed_rows) && is_numeric($job->total_rows)) 
+                    ? round(((int)$job->processed_rows / (int)$job->total_rows) * 100, 2) 
+                    : 0;
+        
         wp_send_json_success([
             'status' => $job->status,
-            'processed_rows' => $job->processed_rows,
-            'total_rows' => $job->total_rows,
+            'processed_rows' => (int)$job->processed_rows,
+            'total_rows' => (int)$job->total_rows,
             'progress' => $progress,
             'started_at' => $job->started_at,
             'finished_at' => $job->finished_at,
-            'error_message' => $job->error_message ?? ''
+            'error_message' => $job->error_message
         ]);
     }
-
+    
     /**
-     * Helper function to validate CSV file structure.
+     * 内部方法: 验证CSV文件内容 (reads file and checks headers/rows)
      */
-    private function validate_csv_file($file_path) {
-        if (!file_exists($file_path)) {
-            throw new Exception('CSV file not found at path: ' . htmlspecialchars($file_path));
+    private function validate_csv_file_contents($file_path) {
+        if (!file_exists($file_path) || !is_readable($file_path)) {
+            throw new Exception(sprintf(__('CSV file not found or not readable at: %s', 'power-importer-pro'), $file_path));
         }
-
+        
         $handle = fopen($file_path, 'r');
         if (!$handle) {
-            throw new Exception('Cannot open CSV file for validation.');
+            throw new Exception(__('Cannot open CSV file for validation.', 'power-importer-pro'));
         }
-
+        
         $headers = fgetcsv($handle);
-        if (!$headers) {
+        if ($headers === false || empty($headers)) {
             fclose($handle);
-            throw new Exception('Invalid CSV format: No headers found.');
+            throw new Exception(__('Invalid CSV format - no headers found or file is empty.', 'power-importer-pro'));
         }
+        $headers = array_map('trim', $headers);
 
-        // Define required columns (customize as needed)
-        $required_columns = ['Name', 'SKU', 'Type'];
+        $required_columns = ['Name', 'SKU', 'Type']; 
         $missing_columns = array_diff($required_columns, $headers);
-
+        
         if (!empty($missing_columns)) {
             fclose($handle);
-            throw new Exception('Missing required columns: ' . implode(', ', $missing_columns));
+            throw new Exception(sprintf(__('Missing required columns: %s', 'power-importer-pro'), implode(', ', $missing_columns)));
         }
-
+        
         $total_rows = 0;
         while (fgetcsv($handle) !== false) {
             $total_rows++;
         }
         fclose($handle);
-
+        
         return [
-            'total_rows' => $total_rows, // Number of data rows (excluding headers)
+            'total_rows' => $total_rows, 
             'headers' => $headers,
-            'file_path' => $file_path // For reference
+            'required_columns' => $required_columns,
+            'validation_passed' => true
         ];
     }
-
+    
     /**
-     * Helper function to process a batch of CSV rows.
-     * Used by AJAX process_batch.
+     * 内部方法: 处理CSV批次 (for AJAX processing)
      */
-    private function process_csv_batch($job, $start_row, $batch_size) {
+    private function process_csv_batch_rows($job, $processed_rows_count, $batch_size) {
+        if (!file_exists($job->file_path) || !is_readable($job->file_path)) {
+            throw new Exception(sprintf(__('CSV file not found or not readable during batch processing: %s', 'power-importer-pro'), $job->file_path));
+        }
+
         $handle = fopen($job->file_path, 'r');
         if (!$handle) {
-            throw new Exception('Cannot open CSV file for batch processing.');
+            throw new Exception(__('Cannot open CSV file for batch processing.', 'power-importer-pro'));
         }
-
-        $headers = fgetcsv($handle); // Read header row
-
-        // Skip rows up to the starting point of this batch
-        for ($i = 0; $i < $start_row; $i++) {
-            if (fgetcsv($handle) === false) { // Should not happen if start_row is correct
-                break;
-            }
+        
+        $csv_headers = fgetcsv($handle); 
+        if ($csv_headers === false) {
+             fclose($handle);
+             throw new Exception(__('Failed to read CSV headers during batch processing.', 'power-importer-pro'));
         }
+        $csv_headers = array_map('trim', $csv_headers);
 
-        $processed_in_batch = 0;
-        $errors_in_batch = [];
-
-        // Assuming PIP_Importer class exists and is loaded.
+        for ($i = 0; $i < $processed_rows_count; $i++) {
+            if (fgetcsv($handle) === false) break; 
+        }
+        
+        $processed_in_this_batch = 0;
+        $errors_in_this_batch = [];
+        
         if (!class_exists('PIP_Importer')) {
-             throw new Exception('PIP_Importer class not found during batch processing.');
+            throw new Exception(__('Importer class PIP_Importer not found.', 'power-importer-pro'));
         }
         $importer = new PIP_Importer($job->file_path, $job->id);
+        $importer->set_variable_product_map(maybe_unserialize($job->variable_product_map ?? '')); // Load map for variations
 
         for ($i = 0; $i < $batch_size; $i++) {
-            $data_row = fgetcsv($handle);
-            if ($data_row === false) { // End of file
-                break;
-            }
+            $data = fgetcsv($handle);
+            if ($data === false) break; // End of file
+            
+            $current_row_number_for_logging = $processed_rows_count + $processed_in_this_batch + 1;
 
-            $current_row_number = $start_row + $processed_in_batch + 1; // 1-based row number
             try {
-                if (count($data_row) === count($headers)) {
-                    $product_data = array_combine($headers, $data_row);
-                    // This assumes PIP_Importer has a method to process a single row of data.
-                    // You might need to adapt this part based on PIP_Importer's capabilities.
-                    // For example, $importer->process_single_item($product_data, $current_row_number);
-                    $this->process_single_row($importer, $product_data, $current_row_number); // Using existing helper
-                    $processed_in_batch++;
+                if (count($data) === count($csv_headers)) {
+                    $product_data = array_combine($csv_headers, $data);
+                    $importer->set_row_count($current_row_number_for_logging);
+                    $importer->process_single_row($product_data);
+                    $processed_in_this_batch++;
                 } else {
-                    $errors_in_batch[] = "Row {$current_row_number}: Column count mismatch.";
-                    pip_db()->add_log($job->id, "Row {$current_row_number}: Column count mismatch.", 'WARNING');
+                    $mismatch_error = sprintf(__( 'Row %d: Column count mismatch. Expected %d, got %d. Skipping row.', 'power-importer-pro' ), $current_row_number_for_logging, count($csv_headers), count($data));
+                    $errors_in_this_batch[] = $mismatch_error;
+                    pip_db()->add_log($job->id, $mismatch_error, 'WARNING');
                 }
             } catch (Exception $e) {
-                $errors_in_batch[] = "Row {$current_row_number}: " . $e->getMessage();
-                pip_db()->add_log($job->id, "Row {$current_row_number} error: " . $e->getMessage(), 'WARNING');
+                $row_error = sprintf(__( 'Row %d: Error - %s', 'power-importer-pro' ), $current_row_number_for_logging, $e->getMessage());
+                $errors_in_this_batch[] = $row_error;
+                pip_db()->add_log($job->id, $row_error, 'ERROR');
             }
         }
-
+        
         fclose($handle);
-
+        // Save variable product map state for next batch
+        pip_db()->update_job($job->id, ['variable_product_map' => serialize($importer->get_variable_product_map())]);
+        
         return [
-            'processed' => $processed_in_batch,
-            'errors' => $errors_in_batch
+            'processed_in_this_batch' => $processed_in_this_batch,
+            'errors_in_this_batch' => $errors_in_this_batch
         ];
+    }
+    
+    /**
+     * 内部方法: 后台处理整个任务 (called by async_background_process)
+     */
+    private function background_process_job_logic($job_id) {
+        $job = pip_db()->get_job($job_id);
+        if (!$job) {
+            pip_db()->add_log($job_id, __('Background process: Job not found.', 'power-importer-pro'), 'ERROR');
+            return;
+        }
+
+        if ($job->status === 'cancelled') {
+            pip_db()->add_log($job_id, __('Background process: Job was cancelled. Aborting.', 'power-importer-pro'), 'INFO');
+            return;
+        }
+        
+        // Ensure status is running_async
+        pip_db()->update_job($job_id, ['status' => 'running_async', 'started_at' => $job->started_at ?? current_time('mysql', 1)]);
+        pip_db()->add_log($job_id, __('Background processing job execution started.', 'power-importer-pro'), 'INFO');
+        
+        try {
+            if (!class_exists('PIP_Importer')) {
+                throw new Exception(__('Importer class PIP_Importer not found.', 'power-importer-pro'));
+            }
+            // Load required WordPress files for product creation/modification
+            require_once( ABSPATH . 'wp-admin/includes/taxonomy.php' );
+            require_once( ABSPATH . 'wp-admin/includes/image.php' );
+            require_once( ABSPATH . 'wp-admin/includes/file.php' );
+            require_once( ABSPATH . 'wp-admin/includes/media.php' );
+            require_once( ABSPATH . 'wp-includes/kses.php' );
+            
+            $importer = new PIP_Importer($job->file_path, $job_id);
+            $importer->run(); // This method should handle its own logging and final status updates
+
+            $final_job_status = pip_db()->get_job_field($job_id, 'status');
+            if ($final_job_status === 'running_async') { 
+                pip_db()->add_log($job_id, __('Background process job: Importer finished but status was not updated. Marking as completed.', 'power-importer-pro'), 'WARNING');
+                pip_db()->update_job($job_id, ['status' => 'completed', 'finished_at' => current_time('mysql', 1)]);
+            } else {
+                 pip_db()->add_log($job_id, sprintf(__('Background process job finished with status: %s.', 'power-importer-pro'), $final_job_status), 'INFO');
+            }
+            
+        } catch (Throwable $e) { // Catch PHP 7+ Errors and Exceptions
+            $error_message = sprintf(__( 'Critical error during background processing for job #%d: %s. File: %s, Line: %s', 'power-importer-pro' ), $job_id, $e->getMessage(), $e->getFile(), $e->getLine());
+            error_log("Power Importer Pro: " . $error_message); 
+            pip_db()->add_log($job_id, $error_message, 'CRITICAL');
+            pip_db()->update_job($job_id, [
+                'status' => 'failed',
+                'finished_at' => current_time('mysql', 1),
+                'error_message' => $e->getMessage()
+            ]);
+        }
     }
 
     /**
-     * Helper to process a single row using the importer instance.
-     * This was an existing method, ensure PIP_Importer supports these calls.
+     * Helper to get status label for UI, considering i18n.
      */
-    private function process_single_row($importer, $product_data, $row_number) {
-        // These methods need to exist on the PIP_Importer class
-        $importer->set_row_count($row_number);
-        $importer->process_single_row($product_data);
+    private function get_status_label($status_key) {
+        $statuses = [
+            'pending' => __('Pending Validation', 'power-importer-pro'),
+            'uploaded' => __('Uploaded', 'power-importer-pro'),
+            'validated' => __('Validated', 'power-importer-pro'),
+            'running_ajax' => __('Running (AJAX)', 'power-importer-pro'),
+            'queued_async' => __('Queued (Background)', 'power-importer-pro'),
+            'running_async' => __('Running (Background)', 'power-importer-pro'),
+            'completed' => __('Completed', 'power-importer-pro'),
+            'failed' => __('Failed', 'power-importer-pro'),
+            'paused' => __('Paused (AJAX)', 'power-importer-pro'),
+            'cancelled' => __('Cancelled', 'power-importer-pro'),
+        ];
+        return $statuses[$status_key] ?? ucfirst(str_replace('_', ' ', $status_key));
     }
 }
 
-// Initialize the AJAX Processor
-new PIP_Ajax_Processor();
+// It's better to instantiate the class within the pip_init function or similar
+// to ensure all WordPress functions are available.
+// new PIP_Ajax_Processor(); // This line might be removed if instantiation is handled in main plugin file.
 ?>
