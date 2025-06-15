@@ -20,22 +20,18 @@ function pip_db() {
 }
 
 /**
- * Action Scheduler 任务的回调函数 - Legacy, to be fully removed or only used if AS is explicitly re-integrated.
+ * Action Scheduler 任务的回调函数
  * @param int $job_id
  */
 function pip_run_import_task_callback( $job_id ) {
-    // This function is problematic if Action Scheduler is being removed.
-    // For now, leaving its internal logic, but its invocation is the primary issue.
     $job = pip_db()->get_job($job_id);
 
     if ( ! $job || empty($job->file_path) || ! file_exists($job->file_path) ) {
         error_log('Power Importer Pro Task Error: Could not find job or filepath in database for job_id: ' . $job_id);
-        if ($job_id) { pip_db()->update_job($job_id, ['status' => 'failed', 'finished_at' => current_time('mysql', 1), 'error_message' => 'Legacy task callback: Job data missing.']); }
+        if ($job_id) { pip_db()->update_job($job_id, ['status' => 'failed', 'finished_at' => current_time('mysql', 1)]); }
         return;
     }
     
-    pip_db()->add_log($job_id, 'Legacy Action Scheduler task callback initiated. This may indicate an incomplete migration if Action Scheduler is meant to be fully removed.', 'WARNING');
-
     // 确保在后台任务中，所有需要的文件都被加载
     require_once( ABSPATH . 'wp-admin/includes/taxonomy.php' );
     require_once( ABSPATH . 'wp-admin/includes/image.php' );
@@ -52,30 +48,99 @@ function pip_run_import_task_callback( $job_id ) {
 //======================================================================
 
 /**
- * AJAX回调：获取最新的任务表格HTML
+ * AJAX回调：获取最新的任务表格数据 as JSON
  */
 function pip_ajax_get_jobs_table_callback() {
     check_ajax_referer('pip_ajax_nonce', 'nonce');
-    
+
     if (!current_user_can('manage_woocommerce')) {
-        wp_send_json_error(['message' => 'Permission denied']);
+        wp_send_json_error(['message' => __('Permission denied.', 'power-importer-pro')]);
         return;
     }
-    
+
     try {
-        ob_start();
-        if (!class_exists('PIP_Admin_Page')) {
-            // Fallback or error if class isn't loaded, though it should be.
-            wp_send_json_error(['message' => 'Admin Page class not available.']);
-            return;
+        $jobs = pip_db()->get_recent_jobs(100); // Fetch raw job data
+        $jobs_array = [];
+
+        foreach ($jobs as $job) {
+            $status_display = ucfirst(str_replace('_', ' ', $job->status));
+            // More specific display names based on status
+            switch ($job->status) {
+                case 'running_ajax':
+                    $status_display = __('Running (AJAX)', 'power-importer-pro');
+                    break;
+                case 'queued_async':
+                    $status_display = __('Queued (Async)', 'power-importer-pro');
+                    break;
+                case 'running_async':
+                    $status_display = __('Running (Async)', 'power-importer-pro');
+                    break;
+                case 'pending':
+                     $status_display = __('Pending Validation', 'power-importer-pro');
+                    break;
+                case 'validated':
+                     $status_display = __('Validated', 'power-importer-pro');
+                    break;
+                case 'completed':
+                     $status_display = __('Completed', 'power-importer-pro');
+                    break;
+                case 'failed':
+                     $status_display = __('Failed', 'power-importer-pro');
+                    break;
+                case 'cancelled':
+                     $status_display = __('Cancelled', 'power-importer-pro');
+                    break;
+                case 'paused':
+                     $status_display = __('Paused', 'power-importer-pro');
+                    break;
+            }
+
+            $duration_formatted = '-';
+            if ($job->started_at) {
+                try {
+                    $start_time = new DateTime($job->started_at, wp_timezone());
+                    $end_time = $job->finished_at ? new DateTime($job->finished_at, wp_timezone()) : new DateTime('now', wp_timezone());
+                    $duration = $start_time->diff($end_time);
+                    
+                    if ($duration->days > 0) {
+                        $duration_formatted = $duration->format('%a d %h h %i m %s s');
+                    } elseif ($duration->h > 0) {
+                        $duration_formatted = $duration->format('%h h %i m %s s');
+                    } elseif ($duration->i > 0) {
+                        $duration_formatted = $duration->format('%i m %s s');
+                    } else {
+                        $duration_formatted = $duration->format('%s s');
+                    }
+                } catch (Exception $e) {
+                    // Handle DateTime constructor error, e.g. if date format is invalid
+                    $duration_formatted = __('Error calculating duration', 'power-importer-pro');
+                }
+            }
+
+            $progress_percentage = 0;
+            if ($job->total_rows > 0 && is_numeric($job->processed_rows) && is_numeric($job->total_rows)) { // Ensure numeric
+                $progress_percentage = round(((int)$job->processed_rows / (int)$job->total_rows) * 100, 2);
+            }
+            
+            $jobs_array[] = [
+                'id' => $job->id,
+                'file_name' => esc_html($job->file_name),
+                'total_rows' => (int)$job->total_rows,
+                'processed_rows' => (int)$job->processed_rows,
+                'status' => $job->status, // Raw status for JS logic
+                'status_display' => $status_display, // Human-readable status
+                'started_at_formatted' => $job->started_at ? get_date_from_gmt($job->started_at, 'Y-m-d H:i:s') : '-',
+                'finished_at_formatted' => $job->finished_at ? get_date_from_gmt($job->finished_at, 'Y-m-d H:i:s') : '-',
+                'duration_formatted' => $duration_formatted,
+                'progress_percentage' => $progress_percentage,
+                'created_at_formatted' => get_date_from_gmt($job->created_at, 'Y-m-d H:i:s'),
+                'error_message' => $job->error_message ? esc_html($job->error_message) : null,
+            ];
         }
-        $admin_page = new PIP_Admin_Page(); // Assuming constructor is safe to call
-        $admin_page->render_jobs_table_content(); // This public method is from the provided code
-        $html = ob_get_clean();
-        
-        wp_send_json_success(['html' => $html]);
+        wp_send_json_success(['jobs' => $jobs_array]);
+
     } catch (Exception $e) {
-        wp_send_json_error(['message' => 'Failed to load jobs table: ' . $e->getMessage()]);
+        wp_send_json_error(['message' => 'Failed to load jobs data: ' . $e->getMessage()]);
     }
 }
 
@@ -86,20 +151,11 @@ function pip_ajax_handle_job_action_callback() {
     check_ajax_referer( 'pip_ajax_nonce', 'nonce' );
     if (!current_user_can('manage_woocommerce')) {
         wp_send_json_error(['message' => 'Permission Denied.']);
-        return;
     }
     $job_id = isset($_POST['job_id']) ? absint($_POST['job_id']) : 0;
     $action = isset($_POST['job_action']) ? sanitize_key($_POST['job_action']) : '';
-
     if (!$job_id || !$action) {
         wp_send_json_error(['message' => 'Invalid Job ID or Action.']);
-        return;
-    }
-
-    $job = pip_db()->get_job($job_id);
-    if (!$job && $action !== 'clear_all') { // clear_all doesn't need a specific job_id
-        wp_send_json_error( ['message' => __( 'Job not found.', 'power-importer-pro' )] );
-        return;
     }
 
     switch ($action) {
@@ -107,57 +163,23 @@ function pip_ajax_handle_job_action_callback() {
             pip_db()->delete_job_and_logs($job_id);
             wp_send_json_success( ['message' => __( 'Job and its logs have been deleted.', 'power-importer-pro' )] );
             break;
-
         case 'retry':
-            $reset_data = [
-                'status'           => 'pending', // Reset to pending, user can re-validate/start
-                'processed_rows'   => 0,
-                'total_rows'       => 0, // Reset total_rows so validation (which sets this) runs again
-                'started_at'       => null,
-                'finished_at'      => null,
-                'error_message'    => null 
-            ];
-            
-            $updated = pip_db()->update_job($job_id, $reset_data);
-
-            if ($updated !== false) {
-                pip_db()->add_log($job_id, 'Job has been reset for retry by user.', 'INFO');
-                wp_send_json_success( ['message' => __( 'Job has been reset and is ready to be started again.', 'power-importer-pro' )] );
+            $action_id = as_enqueue_async_action( 'pip_process_import_file', [ $job_id ], 'power-importer-pro-group' );
+            if ($action_id) {
+                pip_db()->update_job($job_id, ['status' => 'pending', 'processed_rows' => 0, 'started_at' => null, 'finished_at' => null]);
+                wp_send_json_success( ['message' => __( 'Job has been re-scheduled.', 'power-importer-pro' )] );
             } else {
-                pip_db()->add_log($job_id, 'Failed to reset job for retry.', 'ERROR');
-                wp_send_json_error( ['message' => __( 'Failed to reset the job for retry. Please check logs.', 'power-importer-pro' )] );
-            }
-            break; 
-
-        case 'cancel':
-            // Define statuses from which a job can be cancelled
-            // This should align with how PIP_Ajax_Processor handles cancellations for its processes
-            $cancellable_statuses = ['pending', 'validated', 'running_ajax', 'paused', 'queued_async', 'running_async'];
-
-            if (in_array($job->status, $cancellable_statuses)) {
-                $original_status = $job->status;
-                pip_db()->update_job($job_id, [
-                    'status' => 'cancelled', 
-                    'finished_at' => current_time('mysql', 1),
-                    'error_message' => 'Import cancelled by user.' // Add a note
-                ]);
-                // No direct interaction with Action Scheduler here anymore.
-                // If a background task (via wp_remote_post) is truly in flight, 
-                // it would ideally check its job status periodically or on the next processing loop.
-                // True immediate cancellation of a spawned async process is complex.
-                pip_db()->add_log($job_id, "Job status changed to 'cancelled' by user. Original status: {$original_status}.", 'INFO');
-                wp_send_json_success( ['message' => __( 'Job has been marked as cancelled.', 'power-importer-pro' )] );
-            } else {
-                pip_db()->add_log($job_id, "Attempt to cancel job in non-cancellable state: {$job->status}", 'WARNING');
-                wp_send_json_error( ['message' => __( 'Job cannot be cancelled from its current state: ', 'power-importer-pro' ) . $job->status] );
+                wp_send_json_error( ['message' => __( 'Failed to re-schedule the job.', 'power-importer-pro' )] );
             }
             break;
-        
-        default:
-            wp_send_json_error( ['message' => __( 'Unknown action requested.', 'power-importer-pro' )] );
+        case 'cancel':
+            $actions = as_get_scheduled_actions( [ 'hook' => 'pip_process_import_file', 'args' => [ $job_id ], 'status' => [ 'pending', 'in-progress' ] ], 'ids' );
+            if ( ! empty($actions) ) { foreach ($actions as $action_id) { as_cancel_action( $action_id ); } }
+            pip_db()->update_job($job_id, ['status' => 'cancelled', 'finished_at' => current_time('mysql', 1)]);
+            wp_send_json_success( ['message' => __( 'Job has been cancelled.', 'power-importer-pro' )] );
             break;
     }
-    // Default fall-through removed as each case should exit with wp_send_json_...
+    wp_send_json_error( ['message' => 'Unknown action.'] );
 }
 
 /**
@@ -167,14 +189,13 @@ function pip_ajax_handle_clear_jobs_callback() {
     check_ajax_referer( 'pip_ajax_nonce', 'nonce' );
     if ( ! current_user_can( 'manage_woocommerce' ) ) {
         wp_send_json_error( ['message' => 'Permission Denied.'] );
-        return;
     }
-    pip_db()->clear_old_jobs(); // This method should handle statuses like 'completed', 'failed', 'cancelled'
-    wp_send_json_success( ['message' => __( 'All finished (completed, failed, cancelled) jobs and their logs have been cleared.', 'power-importer-pro' )] );
+    pip_db()->clear_old_jobs();
+    wp_send_json_success( ['message' => __( 'All completed, failed, and cancelled jobs have been cleared.', 'power-importer-pro' )] );
 }
 
 //======================================================================
-// 3. 图片处理辅助函数 (User confirmed current logic is satisfactory for now)
+// 3. 图片处理辅助函数 (保持不变)
 //======================================================================
 
 function pip_remote_file($url, $file = "", $timeout = 60) {
@@ -235,4 +256,3 @@ function pip_wp_save_img($url = '', $filename ='', $post_title_for_alt = '') {
     if(file_exists($tmp_filepath)) @unlink($tmp_filepath);
     return false;
 }
-?>
