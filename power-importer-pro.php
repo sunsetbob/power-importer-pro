@@ -3,7 +3,7 @@
  * Plugin Name:       Power Importer Pro
  * Plugin URI:        https://yourwebsite.com/
  * Description:       A professional tool to import WooCommerce products from a CSV file with background processing and detailed logging.
- * Version:           1.5.0 (Stable & Refactored)
+ * Version:           1.5.3
  * Author:            Your Name
  * Author URI:        https://yourwebsite.com/
  * License:           GPL v2 or later
@@ -12,241 +12,274 @@
  * Domain Path:       /languages
  */
 
-// 强制使用直接文件I/O，解决权限问题
-if ( ! defined('FS_METHOD') ) {
-    define('FS_METHOD', 'direct');
-}
-
-// 防止直接访问文件
+// Exit if accessed directly.
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-// 定义插件常量
-define( 'PIP_VERSION', '1.5.0' );
-define( 'PIP_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
-define( 'PIP_UPLOAD_DIR_NAME', 'power-importer-pro-file' );
+// Define plugin constants
+if ( ! defined( 'PIP_VERSION' ) ) {
+    define( 'PIP_VERSION', '1.5.3' ); // Updated version
+}
+if ( ! defined( 'PIP_PLUGIN_DIR' ) ) {
+    define( 'PIP_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
+}
+if ( ! defined( 'PIP_PLUGIN_URL' ) ) { 
+    define( 'PIP_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
+}
+if ( ! defined( 'PIP_UPLOAD_DIR_NAME' ) ) {
+    define( 'PIP_UPLOAD_DIR_NAME', 'power-importer-pro-files' );
+}
 
 /**
- * 加载插件的所有文件
+ * Load plugin files.
  */
-require_once PIP_PLUGIN_DIR . 'includes/functions.php';
-require_once PIP_PLUGIN_DIR . 'includes/class-database.php';
-require_once PIP_PLUGIN_DIR . 'includes/class-importer.php';
-require_once PIP_PLUGIN_DIR . 'includes/class-admin-page.php';
-require_once PIP_PLUGIN_DIR . 'includes/class-ajax-processor.php';
+require_once PIP_PLUGIN_DIR . 'includes/class-pip-db.php';
+require_once PIP_PLUGIN_DIR . 'includes/class-pip-importer.php';
+require_once PIP_PLUGIN_DIR . 'includes/class-pip-ajax-handler.php';
+require_once PIP_PLUGIN_DIR . 'includes/class-pip-admin-page.php';
+require_once PIP_PLUGIN_DIR . 'includes/pip-functions.php';
+
 
 /**
- * 初始化插件和所有钩子
+ * Initialize the plugin.
  */
-function pip_init() {
-    // 不再检查Action Scheduler依赖
-    // 注释掉原来的Action Scheduler检查
-    /*
-    if ( ! function_exists('as_enqueue_async_action') ) {
-        add_action( 'admin_notices', 'pip_show_dependencies_notice' );
-        return;
-    }
-    */
-    
-    // 初始化后台页面
+function pip_init_plugin() {
+    // Load plugin text domain for translations
+    load_plugin_textdomain( 'power-importer-pro', false, dirname( plugin_basename( __FILE__ ) ) . '/languages/' );
+
+    // Initialize database handler
+    PIP_Database::instance();
+
+    // Initialize admin page and AJAX handlers if in admin area
     if ( is_admin() ) {
         new PIP_Admin_Page();
-        
-        // 初始化AJAX处理器
-        new PIP_Ajax_Processor();
+        new PIP_Ajax_Handler(); 
     }
     
-    // 移除Action Scheduler钩子
-    // add_action( 'pip_process_import_file', 'pip_run_import_task_callback', 10, 1 );
-
-    // 保留现有的AJAX钩子（用于向后兼容）
+    add_action( 'wp_ajax_pip_upload_files', 'pip_ajax_upload_files_callback' );
+    add_action( 'wp_ajax_pip_scan_files', 'pip_ajax_scan_files_callback' );
+    add_action( 'wp_ajax_pip_reset_job', 'pip_ajax_reset_job_callback' );
     add_action( 'wp_ajax_pip_get_jobs_table', 'pip_ajax_get_jobs_table_callback' );
     add_action( 'wp_ajax_pip_job_action', 'pip_ajax_handle_job_action_callback' );
     add_action( 'wp_ajax_pip_clear_jobs', 'pip_ajax_handle_clear_jobs_callback' );
-    
-    // 新增文件上传AJAX处理
-    add_action( 'wp_ajax_pip_upload_files', 'pip_ajax_upload_files_callback' );
-    
-    // 新增文件扫描AJAX处理
-    add_action( 'wp_ajax_pip_scan_files', 'pip_ajax_scan_files_callback' );
-    
-    // 新增重置任务AJAX处理
-    add_action( 'wp_ajax_pip_reset_job', 'pip_ajax_reset_job_callback' );
 }
-add_action( 'plugins_loaded', 'pip_init' );
+add_action( 'plugins_loaded', 'pip_init_plugin' );
+
 
 /**
- * 新增：处理文件上传的AJAX回调
+ * Handles file uploads via AJAX.
  */
 function pip_ajax_upload_files_callback() {
-    check_ajax_referer('pip_ajax_nonce', 'nonce');
-    
+    check_ajax_referer('pip_upload_nonce', 'security'); 
+
     if (!current_user_can('manage_woocommerce')) {
-        wp_send_json_error(['message' => 'Permission denied']);
+        wp_send_json_error(['message' => __('Permission denied.', 'power-importer-pro')]);
+        return;
     }
     
-    if (!isset($_FILES['import_csv_files']) || empty($_FILES['import_csv_files']['name'][0])) {
-        wp_send_json_error(['message' => 'No files were uploaded']);
+    if (empty($_FILES['import_csv_files'])) {
+        wp_send_json_error(['message' => __('No files were uploaded.', 'power-importer-pro')]);
+        return;
     }
     
-    $upload_dir = wp_upload_dir();
-    $pip_dir = $upload_dir['basedir'] . '/' . PIP_UPLOAD_DIR_NAME;
-    
-    if (!file_exists($pip_dir) || !is_writable($pip_dir)) {
-        wp_send_json_error(['message' => 'Upload directory is not writable: ' . $pip_dir]);
+    $upload_dir_info = wp_upload_dir();
+    $pip_upload_path = trailingslashit($upload_dir_info['basedir']) . PIP_UPLOAD_DIR_NAME;
+
+    if (!file_exists($pip_upload_path)) {
+        if (!wp_mkdir_p($pip_upload_path)) {
+            wp_send_json_error(['message' => sprintf(__('Upload directory %s could not be created. Please check permissions.', 'power-importer-pro'), esc_html($pip_upload_path))]);
+            return;
+        }
+    }
+
+    if (!is_writable($pip_upload_path)) {
+        wp_send_json_error(['message' => sprintf(__('Upload directory %s is not writable.', 'power-importer-pro'), esc_html($pip_upload_path))]);
+        return;
     }
     
     $files = $_FILES['import_csv_files'];
-    $allowed_types = ['text/csv', 'text/plain', 'application/vnd.ms-excel'];
     $uploaded_jobs = [];
     $errors = [];
-    
-    foreach ($files['name'] as $key => $name) {
-        if ($files['error'][$key] !== UPLOAD_ERR_OK) {
-            $errors[] = "File {$name}: Upload error";
+    $allowed_mime_types = ['text/csv', 'text/plain', 'application/vnd.ms-excel', 'application/csv'];
+
+    $normalized_files = [];
+    if (is_array($files['name'])) {
+        foreach ($files['name'] as $key => $name) {
+            if ($files['error'][$key] === UPLOAD_ERR_NO_FILE) {
+                continue;
+            }
+            $normalized_files[] = [
+                'name' => $name,
+                'type' => $files['type'][$key],
+                'tmp_name' => $files['tmp_name'][$key],
+                'error' => $files['error'][$key],
+                'size' => $files['size'][$key]
+            ];
+        }
+    } elseif (isset($files['name']) && $files['error'] !== UPLOAD_ERR_NO_FILE) {
+        $normalized_files[] = $files;
+    }
+
+    if (empty($normalized_files)) {
+        wp_send_json_error(['message' => __('No files selected for upload.', 'power-importer-pro')]);
+        return;
+    }
+
+    foreach ($normalized_files as $file) {
+        if ($file['error'] !== UPLOAD_ERR_OK) {
+            $errors[] = sprintf(__('File %1$s: Upload error (code: %2$d). %3$s', 'power-importer-pro'), esc_html($file['name']), $file['error'], pip_get_upload_error_message($file['error']));
             continue;
         }
         
-        if (!in_array($files['type'][$key], $allowed_types)) {
-            $errors[] = "File {$name}: Invalid file type";
+        if (!in_array(strtolower($file['type']), $allowed_mime_types) && !preg_match('/\.(csv|txt)$/i', $file['name'])) {
+            $errors[] = sprintf(__('File %1$s: Invalid file type (%2$s). Allowed types: CSV, TXT.', 'power-importer-pro'), esc_html($file['name']), esc_html($file['type']));
             continue;
         }
+
+        $original_filename = sanitize_file_name($file['name']);
+        $new_filename = wp_unique_filename($pip_upload_path, $original_filename);
+        $filepath = $pip_upload_path . '/' . $new_filename;
         
-        $filename = 'import-' . time() . '-' . sanitize_file_name($name);
-        $filepath = $pip_dir . '/' . $filename;
-        
-        if (move_uploaded_file($files['tmp_name'][$key], $filepath)) {
-            $job_id = pip_db()->create_job(basename($filepath), $filepath);
+        if (move_uploaded_file($file['tmp_name'], $filepath)) {
+            if (!is_valid_csv_file($filepath)) { // Validate after moving
+                $errors[] = sprintf(__( 'File %s: Invalid CSV format or missing required headers (Name, SKU, Type). File was uploaded but not added as a job.', 'power-importer-pro'), esc_html($original_filename));
+                unlink($filepath); // Remove invalid file
+                continue;
+            }
+            $job_id = PIP_Database::instance()->create_job(basename($filepath), $filepath);
             if ($job_id) {
                 $uploaded_jobs[] = [
                     'id' => $job_id,
-                    'filename' => $name,
-                    'status' => 'uploaded'
+                    'filename' => $original_filename, 
+                    'status' => 'uploaded' 
                 ];
+                PIP_Database::instance()->add_log($job_id, sprintf(__('File %s uploaded successfully as %s.', 'power-importer-pro'), esc_html($original_filename), esc_html(basename($filepath))), 'INFO');
             } else {
-                $errors[] = "File {$name}: Database error";
+                $errors[] = sprintf(__('File %s: Database error while creating job record.', 'power-importer-pro'), esc_html($original_filename));
+                unlink($filepath); 
             }
         } else {
-            $errors[] = "File {$name}: File move failed";
+            $errors[] = sprintf(__('File %s: Could not be moved to the uploads directory.', 'power-importer-pro'), esc_html($original_filename));
         }
     }
     
     if (!empty($uploaded_jobs)) {
+        $message = sprintf( _n( '%d file uploaded successfully.', '%d files uploaded successfully.', count($uploaded_jobs), 'power-importer-pro' ), count($uploaded_jobs) );
+        if (!empty($errors)) {
+            $error_message_part = sprintf( _n( ' However, %d file had an error.', ' However, %d files had errors.', count($errors), 'power-importer-pro' ), count($errors) );
+            $message .= $error_message_part;
+        }
         wp_send_json_success([
-            'message' => count($uploaded_jobs) . ' files uploaded successfully',
+            'message' => $message,
             'jobs' => $uploaded_jobs,
-            'errors' => $errors
+            'errors' => $errors 
         ]);
     } else {
         wp_send_json_error([
-            'message' => 'No files were uploaded successfully',
+            'message' => __('No files were uploaded successfully. See errors below.', 'power-importer-pro'),
             'errors' => $errors
         ]);
     }
 }
 
+
 /**
- * 新增：扫描上传目录中的CSV文件
+ * Scans the upload directory for CSV/TXT files not yet in the database.
  */
 function pip_ajax_scan_files_callback() {
     check_ajax_referer('pip_ajax_nonce', 'nonce');
     
     if (!current_user_can('manage_woocommerce')) {
-        wp_send_json_error(['message' => 'Permission denied']);
+        wp_send_json_error(['message' => __('Permission denied.', 'power-importer-pro')]);
+        return;
     }
     
-    $upload_dir = wp_upload_dir();
-    $pip_dir = $upload_dir['basedir'] . '/' . PIP_UPLOAD_DIR_NAME;
+    $upload_dir_info = wp_upload_dir();
+    $pip_upload_path = trailingslashit($upload_dir_info['basedir']) . PIP_UPLOAD_DIR_NAME;
     
-    if (!file_exists($pip_dir)) {
-        wp_send_json_error(['message' => 'Upload directory does not exist: ' . $pip_dir]);
+    if (!file_exists($pip_upload_path)) {
+        wp_mkdir_p($pip_upload_path); 
+        if (!file_exists($pip_upload_path)) {
+            wp_send_json_error(['message' => sprintf(__('Upload directory %s does not exist and could not be created.', 'power-importer-pro'), esc_html($pip_upload_path))]);
+            return;
+        }
     }
     
-    // 扫描目录中的CSV文件
-    $files = glob($pip_dir . '/*.{csv,CSV,txt,TXT}', GLOB_BRACE);
-    $new_jobs = [];
-    $existing_files = [];
-    $errors = [];
+    $files_in_dir = glob($pip_upload_path . '/*.{csv,CSV,txt,TXT}', GLOB_BRACE);
+    if ($files_in_dir === false) { 
+        $files_in_dir = [];
+    }
+
+    $new_jobs_data = [];
+    $existing_files_names = [];
+    $error_messages = [];
     
-    // 获取已存在的文件路径
-    global $wpdb;
-    $existing_paths = $wpdb->get_col(
-        "SELECT file_path FROM {$wpdb->prefix}pip_import_jobs"
-    );
+    $existing_db_paths = PIP_Database::instance()->get_all_job_filepaths();
     
-    foreach ($files as $filepath) {
+    foreach ($files_in_dir as $filepath) {
         $filename = basename($filepath);
         
-        // 检查文件是否已经在数据库中
-        if (in_array($filepath, $existing_paths)) {
-            $existing_files[] = $filename;
+        if (in_array($filepath, $existing_db_paths)) {
+            $existing_files_names[] = $filename;
             continue;
         }
         
-        // 验证文件是否为有效的CSV
-        if (!is_valid_csv_file($filepath)) { // Enhanced validation here
-            $errors[] = "File {$filename}: Invalid CSV format or missing required headers (e.g., Name, SKU, Type).";
+        if (!is_valid_csv_file($filepath)) { 
+            $error_messages[] = sprintf(__( 'File %s: Invalid CSV format or missing required headers (Name, SKU, Type). Skipped.', 'power-importer-pro'), esc_html($filename));
             continue;
         }
         
-        // 创建新任务
-        $job_id = pip_db()->create_job($filename, $filepath);
+        $job_id = PIP_Database::instance()->create_job($filename, $filepath);
         if ($job_id) {
-            $new_jobs[] = [
+            $new_jobs_data[] = [
                 'id' => $job_id,
                 'filename' => $filename,
-                'status' => 'pending' // Status after scan, ready for validation/import
+                'status' => 'pending' 
             ];
+            PIP_Database::instance()->add_log($job_id, sprintf(__('File %s found via scan and added as a new job.', 'power-importer-pro'), esc_html($filename)), 'INFO');
         } else {
-            $errors[] = "File {$filename}: Database error while creating job.";
+            $error_messages[] = sprintf(__( 'File %s: Database error while creating job record.', 'power-importer-pro'), esc_html($filename));
         }
     }
     
     $message_parts = [];
-    if (!empty($new_jobs)) {
-        $message_parts[] = count($new_jobs) . ' new file(s) found and added as jobs.';
+    if (!empty($new_jobs_data)) {
+        $message_parts[] = sprintf( _n( '%d new file added as a job.', '%d new files added as jobs.', count($new_jobs_data), 'power-importer-pro' ), count($new_jobs_data) );
     }
-    if (!empty($existing_files)) {
-        $message_parts[] = count($existing_files) . ' file(s) already exist in the job list.';
+    if (!empty($existing_files_names)) {
+        $message_parts[] = sprintf( _n( '%d file was already in the database.', '%d files were already in the database.', count($existing_files_names), 'power-importer-pro' ), count($existing_files_names) );
     }
-    if (!empty($errors)) {
-        $message_parts[] = count($errors) . ' file(s) had errors and were not added (see details below).';
-    }
-    
-    if (empty($new_jobs) && empty($existing_files) && empty($errors)) {
-        wp_send_json_error(['message' => 'No new CSV or TXT files found in the upload directory: ' . $pip_dir]);
-        return;
-    }
-    
-    if (empty($new_jobs) && !empty($errors) && empty($existing_files)) {
-         wp_send_json_error([
-            'message' => "Scan complete. No new valid files were added.",
-            'errors' => $errors,
-            'scanned_directory' => $pip_dir
-        ]);
-        return;
+    if (!empty($error_messages)) {
+         $message_parts[] = sprintf( _n( '%d file could not be added due to errors.', '%d files could not be added due to errors.', count($error_messages), 'power-importer-pro' ), count($error_messages) );
     }
 
+    if (empty($new_jobs_data) && empty($existing_files_names) && empty($error_messages) ) {
+        wp_send_json_success(['message' => __('No new importable files found in the upload directory.', 'power-importer-pro'), 'new_jobs' => [], 'existing_files' => [], 'errors' => []]);
+        return; 
+    }
+    
     wp_send_json_success([
-        'message' => implode(' ', $message_parts),
-        'new_jobs' => $new_jobs,
-        'existing_files' => $existing_files,
-        'errors' => $errors, // Send errors to be displayed in UI
-        'scanned_directory' => $pip_dir
+        'message' => rtrim(implode(' ', $message_parts)),
+        'new_jobs' => $new_jobs_data,
+        'existing_files' => $existing_files_names,
+        'errors' => $error_messages,
+        'scanned_directory' => $pip_upload_path
     ]);
 }
 
 /**
- * 验证CSV文件格式 (Enhanced to check for required headers)
+ * Validates CSV file format, specifically checking for required headers.
  */
 function is_valid_csv_file($filepath) {
     if (!file_exists($filepath) || !is_readable($filepath)) {
+        // error_log("Power Importer: File not found or not readable at {$filepath}");
         return false;
     }
 
-    $handle = fopen($filepath, 'r');
+    $handle = @fopen($filepath, 'r');
     if (!\$handle) {
+        // error_log("Power Importer: Could not open file {$filepath}");
         return false;
     }
 
@@ -254,142 +287,167 @@ function is_valid_csv_file($filepath) {
     fclose(\$handle);
 
     if (\$headers === false || empty(\$headers)) {
-        // Cannot read headers or file is empty
-        return false;
+        // error_log("Power Importer: Could not read headers or file is empty: {$filepath}");
+        return false; 
     }
 
-    // Trim header values
-    \$actual_headers = array_map('trim', \$headers);
+    $actual_headers = array_map('trim', \$headers);
+    $required_headers = ['Name', 'SKU', 'Type']; 
 
-    // Define required headers (case-sensitive, ensure these match expected CSV format)
-    \$required_headers = ['Name', 'SKU', 'Type']; 
-
-    // Check if all required headers are present
-    \$missing_headers = array_diff(\$required_headers, \$actual_headers);
-
-    if (!empty(\$missing_headers)) {
-        // Optional: Log detailed missing headers for server-side debugging
-        // error_log("Power Importer Pro - CSV Validation Error: File {$filepath} is missing headers: " . implode(', ', \$missing_headers));
-        return false; // Required headers are missing
+    foreach (\$required_headers as \$required_header) {
+        if (!in_array(\$required_header, \$actual_headers)) {
+            return false; 
+        }
     }
     
-    // Original check for more than one column.
-    // This is somewhat redundant if \$required_headers has multiple items,
-    // but good as a general structural check.
-    if (count(\$actual_headers) <= 1 && count(\$required_headers) > 1) {
+    if (count(\$actual_headers) < count(\$required_headers)) {
         return false;
     }
 
-    return true; // All checks passed
+    return true; 
 }
 
+
 /**
- * 插件激活时运行的函数
+ * Plugin activation hook.
  */
 function pip_plugin_activation() {
-    // 1. 创建上传目录
-    $upload_dir = wp_upload_dir();
-    $pip_dir = $upload_dir['basedir'] . '/' . PIP_UPLOAD_DIR_NAME;
-    if ( ! file_exists( $pip_dir ) ) {
-        wp_mkdir_p( $pip_dir );
-        if ( ! file_exists($pip_dir . '/.htaccess') ) { file_put_contents($pip_dir . '/.htaccess', 'deny from all'); }
-        if ( ! file_exists($pip_dir . '/index.html') ) { file_put_contents($pip_dir . '/index.html', '<!-- Silence is golden. -->'); }
+    // Create upload directory
+    $upload_dir_info = wp_upload_dir();
+    $pip_upload_path = trailingslashit($upload_dir_info['basedir']) . PIP_UPLOAD_DIR_NAME;
+    if ( ! file_exists( $pip_upload_path ) ) {
+        wp_mkdir_p( $pip_upload_path );
+        if ( ! file_exists( $pip_upload_path . '/.htaccess' ) ) {
+            @file_put_contents( $pip_upload_path . '/.htaccess', 'deny from all' );
+        }
+        if ( ! file_exists( $pip_upload_path . '/index.html' ) ) {
+            @file_put_contents( $pip_upload_path . '/index.html', '<!-- Silence is golden. -->' );
+        }
     }
     
-    // 2. 创建或更新数据库表
-    global $wpdb;
-    $charset_collate = $wpdb->get_charset_collate();
-    require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
-
-    // 【SQL 修复】修正了所有默认值错误
-    $jobs_table_name = $wpdb->prefix . 'pip_import_jobs';
-    \$sql_jobs = "CREATE TABLE \$jobs_table_name (
-        id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
-        file_name VARCHAR(255) NOT NULL,
-        file_path TEXT NOT NULL,
-        total_rows INT(11) UNSIGNED NOT NULL DEFAULT 0,
-        processed_rows INT(11) UNSIGNED NOT NULL DEFAULT 0,
-        status VARCHAR(20) NOT NULL DEFAULT 'pending',
-        started_at DATETIME NULL DEFAULT NULL,
-        finished_at DATETIME NULL DEFAULT NULL,
-        created_at DATETIME NOT NULL,
-        error_message TEXT NULL, -- Added for storing specific error messages for a job
-        PRIMARY KEY  (id),
-        KEY status (status)
-    ) \$charset_collate;";
-    dbDelta( \$sql_jobs );
-
-    \$logs_table_name = $wpdb->prefix . 'pip_import_logs';
-    \$sql_logs = "CREATE TABLE \$logs_table_name (
-        log_id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
-        job_id BIGINT(20) UNSIGNED NOT NULL,
-        log_level VARCHAR(20) NOT NULL DEFAULT 'INFO',
-        message TEXT NOT NULL,
-        log_timestamp DATETIME NOT NULL,
-        PRIMARY KEY  (log_id),
-        KEY job_id (job_id),
-        KEY log_level (log_level)
-    ) \$charset_collate;";
-    dbDelta( \$sql_logs );
+    PIP_Database::instance()->create_tables();
 }
 register_activation_hook( __FILE__, 'pip_plugin_activation' );
 
 /**
- * 修改：依赖提示信息
+ * Admin notice.
  */
-function pip_show_dependencies_notice() {
-    echo '<div class="notice notice-info"><p>' . __( 'Power Importer Pro is now using AJAX-based processing and no longer requires Action Scheduler.', 'power-importer-pro' ) . '</p></div>';
+function pip_show_admin_notices() {
+    // Example: Display a notice if Action Scheduler was previously expected but now it's not.
+    // This can be adapted for other one-time notices.
+    // if (get_option('pip_show_as_deprecation_notice', true)) {
+    //     echo '<div class="notice notice-info is-dismissible"><p>' . esc_html__( 'Power Importer Pro now uses its own background processing and no longer requires Action Scheduler.', 'power-importer-pro' ) . '</p></div>';
+    //     update_option('pip_show_as_deprecation_notice', false); // Show only once
+    // }
 }
+// add_action( 'admin_notices', 'pip_show_admin_notices' ); // Uncomment if you want to show a notice.
 
 /**
- * 新增：重置卡住的任务
+ * Handles AJAX request to reset a job.
  */
 function pip_ajax_reset_job_callback() {
     check_ajax_referer('pip_ajax_nonce', 'nonce');
     
     if (!current_user_can('manage_woocommerce')) {
-        wp_send_json_error(['message' => 'Permission denied']);
+        wp_send_json_error(['message' => __('Permission denied.', 'power-importer-pro')]);
+        return;
     }
     
     $job_id = isset($_POST['job_id']) ? absint($_POST['job_id']) : 0;
-    if (!\$job_id) {
-        wp_send_json_error(['message' => 'Invalid job ID']);
+    if (!$job_id) {
+        wp_send_json_error(['message' => __('Invalid job ID.', 'power-importer-pro')]);
+        return;
     }
     
-    // 重置任务状态
-    \$updated = pip_db()->update_job(\$job_id, [
-        'status' => 'pending', // Reset to pending
+    $reset_data = [
+        'status' => 'pending',
         'processed_rows' => 0,
-        'total_rows' => 0, // Also reset total_rows so validation runs again
+        'total_rows' => 0, 
         'started_at' => null,
         'finished_at' => null,
-        'error_message' => null // Clear any previous error message for the job
-    ]);
+        'error_message' => null 
+    ];
     
-    if (\$updated !== false) { // update_job can return 0 if data is same, but still successful
-        pip_db()->add_log(\$job_id, 'Job has been reset to pending status by user.', 'INFO'); // Changed log level to INFO
-        
+    $updated = PIP_Database::instance()->update_job($job_id, $reset_data);
+    
+    if ($updated !== false) { 
+        PIP_Database::instance()->add_log($job_id, __('Job has been reset to pending status by user.', 'power-importer-pro'), 'INFO');
         wp_send_json_success([
-            'message' => 'Job has been reset successfully. Please re-validate and start the import.',
-            'job_id' => \$job_id
+            'message' => __('Job has been reset successfully. You can now re-validate and start the import.', 'power-importer-pro'),
+            'job_id' => $job_id
         ]);
     } else {
-        pip_db()->add_log(\$job_id, 'Failed to reset job status in database.', 'ERROR');
-        wp_send_json_error(['message' => 'Failed to reset job. Please check plugin logs.']);
+        PIP_Database::instance()->add_log($job_id, __('Failed to reset job status in the database.', 'power-importer-pro'), 'ERROR');
+        wp_send_json_error(['message' => __('Failed to reset job. Please check server logs.', 'power-importer-pro')]);
     }
 }
 
 /**
- * 添加自定义cron间隔 (Still present, but WP-Cron logic removed from Ajax_Processor)
- * This might be used by other parts of WordPress or if user re-enables WP-Cron for other tasks.
- * If completely unused by this plugin, it could be removed. For now, keeping it is harmless.
+ * Adds custom cron schedules.
+ * Not actively used by the plugin's core import logic but kept for potential future use.
  */
-function pip_add_cron_intervals(\$schedules) {
-    \$schedules['every_minute'] = array(
-        'interval' => 60,
-        'display' => __('Every Minute', 'power-importer-pro')
-    );
-    return \$schedules;
+function pip_add_cron_intervals($schedules) {
+    if (!isset($schedules['every_minute'])){
+        $schedules['every_minute'] = array(
+            'interval' => 60,
+            'display' => __('Every Minute', 'power-importer-pro')
+        );
+    }
+    return $schedules;
 }
 add_filter('cron_schedules', 'pip_add_cron_intervals');
+
+/**
+ * Helper function to get upload error messages.
+ *
+ * @param int $error_code PHP_UPLOAD_ERR_* constant.
+ * @return string Translatable error message.
+ */
+function pip_get_upload_error_message( $error_code ) {
+    switch ($error_code) {
+        case UPLOAD_ERR_INI_SIZE:
+            return __( 'The uploaded file exceeds the upload_max_filesize directive in php.ini.', 'power-importer-pro' );
+        case UPLOAD_ERR_FORM_SIZE:
+            return __( 'The uploaded file exceeds the MAX_FILE_SIZE directive that was specified in the HTML form.', 'power-importer-pro' );
+        case UPLOAD_ERR_PARTIAL:
+            return __( 'The uploaded file was only partially uploaded.', 'power-importer-pro' );
+        case UPLOAD_ERR_NO_FILE:
+            // This case is usually handled before calling this function.
+            return __( 'No file was uploaded.', 'power-importer-pro' ); 
+        case UPLOAD_ERR_NO_TMP_DIR:
+            return __( 'Missing a temporary folder.', 'power-importer-pro' );
+        case UPLOAD_ERR_CANT_WRITE:
+            return __( 'Failed to write file to disk.', 'power-importer-pro' );
+        case UPLOAD_ERR_EXTENSION:
+            return __( 'A PHP extension stopped the file upload.', 'power-importer-pro' );
+        default:
+            return __( 'Unknown upload error.', 'power-importer-pro' );
+    }
+}
+
+// Function to ensure upload directory exists and is writable
+// This can be called at the beginning of upload/scan functions.
+function pip_ensure_upload_dir() {
+    $upload_dir_info = wp_upload_dir();
+    $pip_upload_path = trailingslashit($upload_dir_info['basedir']) . PIP_UPLOAD_DIR_NAME;
+
+    if (!file_exists($pip_upload_path)) {
+        if (!wp_mkdir_p($pip_upload_path)) {
+            return new WP_Error('dir_creation_failed', sprintf(__('Upload directory %s could not be created. Please check parent directory permissions.', 'power-importer-pro'), esc_html(trailingslashit($upload_dir_info['basedir']) . PIP_UPLOAD_DIR_NAME)));
+        }
+        // Add .htaccess and index.html for security
+        if ( ! file_exists( $pip_upload_path . '/.htaccess' ) ) {
+            @file_put_contents( $pip_upload_path . '/.htaccess', 'deny from all' );
+        }
+        if ( ! file_exists( $pip_upload_path . '/index.html' ) ) {
+            @file_put_contents( $pip_upload_path . '/index.html', '<!-- Silence is golden. -->' );
+        }
+    }
+
+    if (!is_writable($pip_upload_path)) {
+        return new WP_Error('dir_not_writable', sprintf(__('Upload directory %s is not writable. Please check permissions.', 'power-importer-pro'), esc_html($pip_upload_path)));
+    }
+    return $pip_upload_path;
+}
+
 ?>
