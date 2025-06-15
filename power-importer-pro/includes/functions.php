@@ -48,26 +48,99 @@ function pip_run_import_task_callback( $job_id ) {
 //======================================================================
 
 /**
- * AJAX回调：获取最新的任务表格HTML
+ * AJAX回调：获取最新的任务表格数据 as JSON
  */
 function pip_ajax_get_jobs_table_callback() {
-    // 添加nonce检查
     check_ajax_referer('pip_ajax_nonce', 'nonce');
-    
+
     if (!current_user_can('manage_woocommerce')) {
-        wp_send_json_error(['message' => 'Permission denied']);
+        wp_send_json_error(['message' => __('Permission denied.', 'power-importer-pro')]);
+        return;
     }
-    
+
     try {
-        ob_start();
-        // 临时创建一个Admin Page实例，只为了调用它的渲染方法
-        $admin_page = new PIP_Admin_Page();
-        $admin_page->render_jobs_table_content();
-        $html = ob_get_clean();
-        
-        wp_send_json_success(['html' => $html]);
+        $jobs = pip_db()->get_recent_jobs(100); // Fetch raw job data
+        $jobs_array = [];
+
+        foreach ($jobs as $job) {
+            $status_display = ucfirst(str_replace('_', ' ', $job->status));
+            // More specific display names based on status
+            switch ($job->status) {
+                case 'running_ajax':
+                    $status_display = __('Running (AJAX)', 'power-importer-pro');
+                    break;
+                case 'queued_async':
+                    $status_display = __('Queued (Async)', 'power-importer-pro');
+                    break;
+                case 'running_async':
+                    $status_display = __('Running (Async)', 'power-importer-pro');
+                    break;
+                case 'pending':
+                     $status_display = __('Pending Validation', 'power-importer-pro');
+                    break;
+                case 'validated':
+                     $status_display = __('Validated', 'power-importer-pro');
+                    break;
+                case 'completed':
+                     $status_display = __('Completed', 'power-importer-pro');
+                    break;
+                case 'failed':
+                     $status_display = __('Failed', 'power-importer-pro');
+                    break;
+                case 'cancelled':
+                     $status_display = __('Cancelled', 'power-importer-pro');
+                    break;
+                case 'paused':
+                     $status_display = __('Paused', 'power-importer-pro');
+                    break;
+            }
+
+            $duration_formatted = '-';
+            if ($job->started_at) {
+                try {
+                    $start_time = new DateTime($job->started_at, wp_timezone());
+                    $end_time = $job->finished_at ? new DateTime($job->finished_at, wp_timezone()) : new DateTime('now', wp_timezone());
+                    $duration = $start_time->diff($end_time);
+
+                    if ($duration->days > 0) {
+                        $duration_formatted = $duration->format('%a d %h h %i m %s s');
+                    } elseif ($duration->h > 0) {
+                        $duration_formatted = $duration->format('%h h %i m %s s');
+                    } elseif ($duration->i > 0) {
+                        $duration_formatted = $duration->format('%i m %s s');
+                    } else {
+                        $duration_formatted = $duration->format('%s s');
+                    }
+                } catch (Exception $e) {
+                    // Handle DateTime constructor error, e.g. if date format is invalid
+                    $duration_formatted = __('Error calculating duration', 'power-importer-pro');
+                }
+            }
+
+            $progress_percentage = 0;
+            if ($job->total_rows > 0 && is_numeric($job->processed_rows) && is_numeric($job->total_rows)) { // Ensure numeric
+                $progress_percentage = round(((int)$job->processed_rows / (int)$job->total_rows) * 100, 2);
+            }
+
+            $jobs_array[] = [
+                'id' => $job->id,
+                'file_name' => esc_html($job->file_name),
+                'total_rows' => (int)$job->total_rows,
+                'processed_rows' => (int)$job->processed_rows,
+                'status' => $job->status, // Raw status for JS logic
+                'status_display' => $status_display, // Human-readable status
+                'started_at_formatted' => $job->started_at ? get_date_from_gmt($job->started_at, 'Y-m-d H:i:s') : '-',
+                'finished_at_formatted' => $job->finished_at ? get_date_from_gmt($job->finished_at, 'Y-m-d H:i:s') : '-',
+                'duration_formatted' => $duration_formatted,
+                'progress_percentage' => $progress_percentage,
+                'created_at_formatted' => get_date_from_gmt($job->created_at, 'Y-m-d H:i:s'),
+                'error_message' => $job->error_message ? esc_html($job->error_message) : null,
+            ];
+        }
+        wp_send_json_success(['jobs' => $jobs_array]);
+
     } catch (Exception $e) {
-        wp_send_json_error(['message' => 'Failed to load jobs table: ' . $e->getMessage()]);
+        wp_send_json_error(['message' => 'Failed to load jobs data: ' . $e->getMessage()]);
     }
 }
 
@@ -77,12 +150,14 @@ function pip_ajax_get_jobs_table_callback() {
 function pip_ajax_handle_job_action_callback() {
     check_ajax_referer( 'pip_ajax_nonce', 'nonce' );
     if (!current_user_can('manage_woocommerce')) {
-        wp_send_json_error(['message' => 'Permission Denied.']);
+        wp_send_json_error(['message' => __( 'Permission Denied.', 'power-importer-pro')]);
+        return; // Added return
     }
     $job_id = isset($_POST['job_id']) ? absint($_POST['job_id']) : 0;
     $action = isset($_POST['job_action']) ? sanitize_key($_POST['job_action']) : '';
     if (!$job_id || !$action) {
-        wp_send_json_error(['message' => 'Invalid Job ID or Action.']);
+        wp_send_json_error(['message' => __( 'Invalid Job ID or Action.', 'power-importer-pro')]);
+        return; // Added return
     }
 
     switch ($action) {
@@ -106,7 +181,7 @@ function pip_ajax_handle_job_action_callback() {
             wp_send_json_success( ['message' => __( 'Job has been cancelled.', 'power-importer-pro' )] );
             break;
     }
-    wp_send_json_error( ['message' => 'Unknown action.'] );
+    wp_send_json_error( ['message' => __( 'Unknown action.', 'power-importer-pro' )] );
 }
 
 /**
@@ -115,7 +190,8 @@ function pip_ajax_handle_job_action_callback() {
 function pip_ajax_handle_clear_jobs_callback() {
     check_ajax_referer( 'pip_ajax_nonce', 'nonce' );
     if ( ! current_user_can( 'manage_woocommerce' ) ) {
-        wp_send_json_error( ['message' => 'Permission Denied.'] );
+        wp_send_json_error( ['message' => __( 'Permission Denied.', 'power-importer-pro' )] );
+        return; // Added return
     }
     pip_db()->clear_old_jobs();
     wp_send_json_success( ['message' => __( 'All completed, failed, and cancelled jobs have been cleared.', 'power-importer-pro' )] );

@@ -129,45 +129,47 @@ class PIP_Importer {
     public function run() {
         try {
             pip_db()->update_job($this->current_job_id, ['status' => 'running', 'started_at' => current_time('mysql', 1)]);
-            $this->log("--- 开始导入任务 #{$this->current_job_id} ---", 'INFO');
+            $this->log(sprintf(__( '--- Import task #%d started ---', 'power-importer-pro' ), $this->current_job_id), 'INFO');
 
             add_filter( 'upload_dir', [ $this, 'custom_upload_dir' ] );
 
             if (!file_exists($this->csv_path)) {
-                throw new Exception("CSV文件未找到于路径: " . $this->csv_path);
+                throw new Exception(sprintf(__( 'CSV file not found at path: %s', 'power-importer-pro' ), esc_html($this->csv_path)));
             }
 
             $file_content = file($this->csv_path, FILE_SKIP_EMPTY_LINES);
             if (false === $file_content) {
-                 throw new Exception("无法读取CSV文件: " . $this->csv_path);
+                 throw new Exception(sprintf(__( 'Cannot read CSV file: %s', 'power-importer-pro' ), esc_html($this->csv_path)));
             }
-            $total_rows = max(0, count($file_content) - 1);
+            $total_rows = max(0, count($file_content) - 1); // Exclude header row for total count
             pip_db()->update_job($this->current_job_id, ['total_rows' => $total_rows]);
 
             if (($handle = fopen($this->csv_path, "r")) !== FALSE) {
-                $headers = array_map('trim', fgetcsv($handle));
+                $headers = array_map('trim', fgetcsv($handle)); // Read and trim headers
                 while (($data = fgetcsv($handle)) !== FALSE) {
                     $this->row_count++;
                     if (count($data) !== count($headers)) {
-                        $this->log("⚠️ [行号: {$this->row_count}] 列数与表头不匹配，已跳过。", 'WARNING');
+                        $this->log(sprintf(__( '⚠️ [Row: %d] Column count does not match headers. Skipped.', 'power-importer-pro' ), $this->row_count), 'WARNING');
                         continue;
                     }
                     $product_data = array_combine($headers, $data);
-                    $this->process_row($product_data);
-                    if ($this->row_count % 20 === 0) {
+                    $this->process_row($product_data); // process_row will handle its own logging for success/failure of individual items
+                    if ($this->row_count % 20 === 0) { // Update progress periodically
                         pip_db()->update_job($this->current_job_id, ['processed_rows' => $this->row_count]);
                     }
                 }
                 fclose($handle);
             }
             
-            pip_db()->update_job($this->current_job_id, ['processed_rows' => $this->row_count]);
-            $this->log("--- 导入执行完毕 ---", 'SUCCESS');
+            pip_db()->update_job($this->current_job_id, ['processed_rows' => $this->row_count]); // Final update of processed rows
+            $this->log(__( '--- Import execution finished ---', 'power-importer-pro' ), 'SUCCESS');
             pip_db()->update_job($this->current_job_id, ['status' => 'completed', 'finished_at' => current_time('mysql', 1)]);
 
         } catch (Exception $e) {
-            $this->log("致命错误导致任务中断: " . $e->getMessage(), 'ERROR');
-            pip_db()->update_job($this->current_job_id, ['status' => 'failed', 'finished_at' => current_time('mysql', 1)]);
+            // Ensure exception messages that might be technical are not directly shown if $e->getMessage() is used in UI.
+            // Here, it's for logging, so it's okay, but if this message bubbles up, it needs care.
+            $this->log(sprintf(__( 'Fatal error caused task interruption: %s', 'power-importer-pro' ), $e->getMessage()), 'ERROR');
+            pip_db()->update_job($this->current_job_id, ['status' => 'failed', 'finished_at' => current_time('mysql', 1), 'error_message' => $e->getMessage()]);
         }
 
         remove_filter( 'upload_dir', [ $this, 'custom_upload_dir' ] );
@@ -193,9 +195,9 @@ class PIP_Importer {
         $param['path']   = $param['basedir'] . $subdir; $param['url']    = $param['baseurl'] . $subdir; $param['subdir'] = $subdir;
         if ( ! file_exists( $param['path'] ) ) {
             if ( ! wp_mkdir_p( $param['path'] ) ) {
-                $this->log( "⚠️ 无法创建专属图片目录 {$param['path']}，将使用默认目录。", 'WARNING' );
+                $this->log( sprintf(__( '⚠️ Could not create custom image directory %s. Default directory will be used.', 'power-importer-pro' ), esc_html($param['path']) ), 'WARNING' );
                 remove_filter('upload_dir', [$this, 'custom_upload_dir']);
-                return $GLOBALS['wp_upload_dir'];
+                return $GLOBALS['wp_upload_dir']; // Return original WordPress upload dir array
             }
         }
         return $param;
@@ -213,17 +215,28 @@ class PIP_Importer {
     
     private function process_parent_product($data, $type, $name) {
         $sku = trim($data['SKU']);
-        if (empty($sku)) { $this->log("❌ [行号: {$this->row_count}] {$type} 类型产品 SKU 为空，无法创建 '{$name}'。", 'ERROR'); return; }
-        if ($existing_id = $this->get_product_id_by_sku_cached($sku)) { $this->log("↪️ [行号: {$this->row_count}] SKU '{$sku}' 已存在 (ID: {$existing_id})，跳过产品 '{$name}'。", 'INFO'); $this->variable_product_map[$sku] = $existing_id; return; }
+        if (empty($sku)) {
+            $this->log(sprintf("❌ [Row: %d] Product type '%s' with name '%s' has empty SKU. Skipped.", $this->row_count, esc_html($type), esc_html($name)), 'ERROR');
+            return;
+        }
+        if ($existing_id = $this->get_product_id_by_sku_cached($sku)) {
+            $this->log(sprintf("↪️ [Row: %d] SKU '%s' already exists (ID: %d). Skipped product '%s'.", $this->row_count, esc_html($sku), $existing_id, esc_html($name)), 'INFO');
+            $this->variable_product_map[$sku] = $existing_id;
+            return;
+        }
         kses_remove_filters();
         $post_id = wp_insert_post(['post_title' => $name, 'post_content' => $data['Description'] ?? '', 'post_excerpt' => $data['Short description'] ?? '', 'post_status'  => 'publish', 'post_type' => 'product']);
         kses_init_filters();
-        if (is_wp_error($post_id) || !$post_id) { $error_message = is_wp_error($post_id) ? $post_id->get_error_message() : '返回了无效的产品ID(0)。'; $this->log("❌ [行号: {$this->row_count}] 创建产品 '{$name}' 失败: " . $error_message, 'ERROR'); return; }
+        if (is_wp_error($post_id) || !$post_id) {
+            $error_message = is_wp_error($post_id) ? $post_id->get_error_message() : __('Returned invalid product ID (0).', 'power-importer-pro');
+            $this->log(sprintf("❌ [Row: %d] Failed to create product '%s': %s", $this->row_count, esc_html($name), $error_message), 'ERROR');
+            return;
+        }
         
         $this->variable_product_map[$sku] = $post_id;
         wp_set_object_terms($post_id, $type, 'product_type');
         update_post_meta($post_id, '_sku', $sku);
-        $this->update_sku_cache($sku, $post_id); // 更新SKU缓存
+        $this->update_sku_cache($sku, $post_id);
         $this->set_categories($post_id, $data['Categories'] ?? '');
         
         $this->current_processing_post_id = $post_id;
@@ -242,36 +255,69 @@ class PIP_Importer {
         $this->set_images($post_id, $data['Images'] ?? '', $name);
         $this->current_processing_post_id = 0;
         
-        $this->log("✅ [行号: {$this->row_count}] 成功创建 {$type} 产品: '{$name}' (ID: {$post_id})", 'SUCCESS');
+        $this->log(sprintf("✅ [Row: %d] Successfully created %s product: '%s' (ID: %d)", $this->row_count, esc_html($type), esc_html($name), $post_id), 'SUCCESS');
     }
 
     private function process_variation_product($data, $name) {
         $sku = trim($data['SKU']);
-        if (empty($sku) || $this->get_product_id_by_sku_cached($sku)) { $log_message = empty($sku) ? "变体SKU为空" : "变体SKU '{$sku}' 已存在"; $this->log("  ↳ [行号: {$this->row_count}] {$log_message}，跳过创建。", 'INFO'); return; }
+        if (empty($sku)) {
+            $this->log(sprintf("  ↳ [Row: %d] Variation SKU is empty for '%s'. Skipped.", $this->row_count, esc_html($name)), 'INFO');
+            return;
+        }
+        if ($this->get_product_id_by_sku_cached($sku)) {
+            $this->log(sprintf("  ↳ [Row: %d] Variation SKU '%s' already exists. Skipped creation for '%s'.", $this->row_count, esc_html($sku), esc_html($name)), 'INFO');
+            return;
+        }
         
         $parent_sku = trim($data['Parent']); $parent_id = null;
         if (isset($this->variable_product_map[$parent_sku])) { $parent_id = $this->variable_product_map[$parent_sku]; } else { $parent_id = $this->get_product_id_by_sku_cached($parent_sku); }
-        if (!$parent_id) { $this->log("❌ [行号: {$this->row_count}] 变体 '{$name}' 找不到父产品 (SKU: {$parent_sku})，已跳过。", 'ERROR'); return; }
+        if (!$parent_id) {
+            $this->log(sprintf("❌ [Row: %d] Variation '%s' (SKU: %s) could not find parent product with SKU '%s'. Skipped.", $this->row_count, esc_html($name), esc_html($sku), esc_html($parent_sku)), 'ERROR');
+            return;
+        }
         
-        $this->current_processing_post_id = $parent_id;
-        $this->variable_product_map[$parent_sku] = $parent_id;
+        $this->current_processing_post_id = $parent_id; // Set for image directory context
+        $this->variable_product_map[$parent_sku] = $parent_id; // Ensure parent is mapped
 
         $variation = new WC_Product_Variation(); $variation->set_parent_id($parent_id);
         $attributes = [];
-        if (!empty($data['Attribute 1 name']) && !empty($data['Attribute 1 value(s)'])) { $attr_name = wc_sanitize_taxonomy_name(trim($data['Attribute 1 name'])); $attr_value = trim($data['Attribute 1 value(s)']); $attributes['attribute_' . $attr_name] = $attr_value; }
+        // Assuming only one attribute for variation for simplicity, as per original logic. Expand if needed.
+        if (!empty($data['Attribute 1 name']) && !empty($data['Attribute 1 value(s)'])) {
+            $attr_name = wc_sanitize_taxonomy_name(trim($data['Attribute 1 name']));
+            $attr_value = trim($data['Attribute 1 value(s)']);
+            // For global attributes, the slug should be used for the key.
+            // For local attributes, the name is used. This assumes global attributes are pre-registered with correct slugs.
+            $attribute_taxonomy_name = $attr_name; // Fallback for local if not found as global
+            $parent_product = wc_get_product($parent_id);
+            if($parent_product){
+                foreach($parent_product->get_attributes() as $parent_attr_key => $parent_attr_obj){
+                    if( $parent_attr_obj->get_name() === $attr_name || $parent_attr_key === $attr_name || $parent_attr_key === 'pa_' . $attr_name){
+                         $attribute_taxonomy_name = $parent_attr_key; // Use the exact key from parent
+                         break;
+                    }
+                }
+            }
+            $attributes[$attribute_taxonomy_name] = $attr_value;
+        }
         $variation->set_attributes($attributes);
         $variation->set_sku($sku); $variation->set_regular_price($data['Regular price'] ?? '');
         if (!empty($data['Sale price'])) { $variation->set_sale_price($data['Sale price'] ?? ''); }
-        $variation->set_manage_stock('no'); $variation->set_stock_status('instock');
+        $variation->set_manage_stock(false); // Default for variations unless specified
+        $variation->set_stock_status('instock'); // Default
         
         $variation_id = $variation->save();
-        $this->update_sku_cache($sku, $variation_id); // 更新SKU缓存
+        if (is_wp_error($variation_id)) {
+            $this->log(sprintf("❌ [Row: %d] Failed to save variation for SKU '%s': %s", $this->row_count, esc_html($sku), $variation_id->get_error_message()), 'ERROR');
+            return;
+        }
+        $this->update_sku_cache($sku, $variation_id);
         
-        $parent_product_title = get_the_title($parent_id); $variation_image_alt = $parent_product_title . ' - ' . ($data['Attribute 1 value(s)'] ?? $sku);
+        $parent_product_title = get_the_title($parent_id);
+        $variation_image_alt = $parent_product_title . ' - ' . ($data['Attribute 1 value(s)'] ?? $sku);
         $this->set_images($variation_id, $data['Images'] ?? '', $variation_image_alt, true);
-        $this->current_processing_post_id = 0;
+        $this->current_processing_post_id = 0; // Reset after image processing
         
-        $this->log("  ↳ [行号: {$this->row_count}] 成功创建变体 (ID: {$variation_id}) 并关联到父产品 '{$parent_sku}'", 'SUCCESS');
+        $this->log(sprintf("  ↳ [Row: %d] Successfully created variation (ID: %d) for SKU '%s', linked to parent '%s'.", $this->row_count, $variation_id, esc_html($sku), esc_html($parent_sku)), 'SUCCESS');
     }
 
     private function set_images($post_id, $images_str, $post_title, $is_variation = false) {
@@ -282,8 +328,22 @@ class PIP_Importer {
             $filename = sanitize_title($post_title) . '-' . $post_id . '-' . ($index + 1);
             $attachment_id = pip_wp_save_img($url, $filename, $post_title);
             if ($attachment_id && !is_wp_error($attachment_id)) {
-                if (!$thumbnail_set) { if($is_variation) { update_post_meta($post_id, '_thumbnail_id', $attachment_id); } else { set_post_thumbnail($post_id, $attachment_id); } $thumbnail_set = true; } else { if (!$is_variation) { $gallery_ids[] = $attachment_id; } }
-            } else { $this->log("  - ⚠️ 图片下载或处理失败: {$url}", 'WARNING'); }
+                if (!$thumbnail_set) {
+                    if($is_variation) {
+                        update_post_meta($post_id, '_thumbnail_id', $attachment_id);
+                    } else {
+                        set_post_thumbnail($post_id, $attachment_id);
+                    }
+                    $thumbnail_set = true;
+                } else {
+                    if (!$is_variation) {
+                        $gallery_ids[] = $attachment_id;
+                    }
+                }
+            } else {
+                $error_detail = is_wp_error($attachment_id) ? $attachment_id->get_error_message() : 'Unknown error';
+                $this->log(sprintf("  - ⚠️ " . __( 'Image download or processing failed for URL: %s. Error: %s', 'power-importer-pro' ), esc_url($url), esc_html($error_detail)), 'WARNING');
+            }
         }
         if (!$is_variation && !empty($gallery_ids)) { update_post_meta($post_id, '_product_image_gallery', implode(',', $gallery_ids)); }
     }
